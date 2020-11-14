@@ -14,6 +14,7 @@
 #include "../fem/h1lofe.hpp"
 #include <parallelngs.hpp>
 #include <regex>
+#include "compressedfespace.hpp"
 
 using namespace ngmg;
 
@@ -130,6 +131,18 @@ lot of new non-zero entries in the matrix!\n" << endl;
         for (int i : Range(ma->GetNRegions(BBND)))
           if (std::regex_match (ma->GetMaterial(BBND, i), pattern))
             dirichlet_constraints[BBND].SetBit(i);
+      }
+
+    if (flags.StringFlagDefined("dirichlet_bbbnd"))
+      {
+        dirichlet_constraints[BBBND].SetSize (ma->GetNRegions(BBBND));
+        dirichlet_constraints[BBBND].Clear();
+        
+        std::regex pattern(flags.GetStringFlag("dirichlet_bbbnd"));
+        for (int i : Range(ma->GetNRegions(BBBND)))
+          if (std::regex_match (ma->GetMaterial(BBBND, i), pattern))
+            
+            dirichlet_constraints[BBBND].SetBit(i);
       }
 
     
@@ -336,6 +349,11 @@ lot of new non-zero entries in the matrix!\n" << endl;
       "  i.e. points in 2D and edges in 3D.\n"
       "  More than one boundary can be combined by the | operator,\n"
       "  i.e.: dirichlet_bbnd = 'top|right'";
+    docu.Arg("dirichlet_bbbnd") = "regexpr\n"
+      "  Regular expression string defining the dirichlet bbboundary,\n"
+      "  i.e. points in 3D.\n"
+      "  More than one boundary can be combined by the | operator,\n"
+      "  i.e.: dirichlet_bbbnd = 'top|right'";
     docu.Arg("definedon") = "Region or regexpr\n"
       "  FESpace is only defined on specific Region, created with mesh.Materials('regexpr')\n"
       "  or mesh.Boundaries('regexpr'). If given a regexpr, the region is assumed to be\n"
@@ -406,7 +424,7 @@ lot of new non-zero entries in the matrix!\n" << endl;
             }
     }
     */
-    for (auto vb : { BND, BBND, BBND })
+    for (auto vb : { BND, BBND, BBBND })
       {
         auto & dc = dirichlet_constraints[int(vb)];
         if (dc.Size())
@@ -472,7 +490,7 @@ lot of new non-zero entries in the matrix!\n" << endl;
             if (IsRegularDof(d)) dirichlet_dofs.SetBit (d);
     */
 
-    for (auto vb : { BND, BBND, BBND })
+    for (auto vb : { BND, BBND, BBBND })
       {
         auto & dc = dirichlet_constraints[int(vb)];
         if (dc.Size())
@@ -1909,21 +1927,61 @@ lot of new non-zero entries in the matrix!\n" << endl;
         auto diagmat = make_shared<DiagonalMatrix<>> (scaling);
         sum = make_shared<ProductMatrix> (diagmat, sum);
       }
+
+    if (IsParallel())
+      {
+        if (multiple)
+          throw Exception("parallel convertL2 operator only available for non-coupling spaces");
+        sum = make_shared<ParallelMatrix> (sum, GetParallelDofs(), l2space->GetParallelDofs(), C2C);
+      }
     
     return sum;    
   }
 
+#ifdef OLD
+  Table<int> Nodes2Table (const MeshAccess & ma,
+                          const Array<NodeId> & dofnodes)
+  {
+    size_t ndof = dofnodes.Size();
 
+    /*
+    Array<int> ndistprocs(ndof);
+    ndistprocs = 0;
+    for (size_t i = 0; i < ndof; i++)
+      {
+	if (dofnodes[i].GetNr() == -1) continue;
+        ndistprocs[i] = ma.GetDistantProcs (dofnodes[i]).Size();
+      }
+
+    Table<int> dist_procs(ndistprocs);
+    for (size_t i = 0; i < ndof; i++)
+      {
+	if (dofnodes[i].GetNr() == -1) continue;
+	dist_procs[i] = ma.GetDistantProcs (dofnodes[i]);
+      }
+    return dist_procs;
+    */
+    TableCreator<int> creator(ndof);
+    for ( ; !creator.Done(); creator++)
+      for (size_t i = 0; i < ndof; i++)
+        if (dofnodes[i].GetNr() != -1) 
+          creator.Add (i, ma.GetDistantProcs (dofnodes[i]));
+    return creator.MoveTable();
+  }
+#endif
+  
   
   void FESpace :: UpdateParallelDofs ( )
   {
-    if (ma->GetCommunicator().Size() == 1) return;
+    if (!ma->GetCommunicator().ValidCommunicator()) return;
+    // if (ma->GetCommunicator().Size() == 1) return;
 
     static Timer timer ("FESpace::UpdateParallelDofs"); RegionTimer reg(timer);
 
-    Array<NodeId> dofnodes (GetNDof());
+    size_t ndof = GetNDof();
+    Array<NodeId> dofnodes (ndof);
     dofnodes = NodeId (NT_VERTEX, -1);
-    
+
     Array<int> dnums;
     for (NODE_TYPE nt : { NT_VERTEX, NT_EDGE, NT_FACE, NT_CELL, NT_GLOBAL })
       for (NodeId ni : ma->Nodes(nt))
@@ -1933,17 +1991,28 @@ lot of new non-zero entries in the matrix!\n" << endl;
 	    if (IsRegularDof(d)) dofnodes[d] = ni;
 	} 
 
-    paralleldofs = make_shared<ParallelMeshDofs> (ma, dofnodes, dimension, iscomplex);
+    // paralleldofs = make_shared<ParallelMeshDofs> (ma, dofnodes, dimension, iscomplex);
+    // paralleldofs = make_shared<ParallelDofs>
+    // (ma->GetCommunicator(), Nodes2Table(*ma, dofnodes), dimension, iscomplex);
 
-    // if (MyMPI_AllReduce (ctofdof.Size(), MPI_SUM, ma->GetCommunicator()))
+    TableCreator<int> creator(ndof);
+    for ( ; !creator.Done(); creator++)
+      for (size_t i = 0; i < ndof; i++)
+        if (dofnodes[i].GetNr() != -1) 
+          creator.Add (i, ma->GetDistantProcs (dofnodes[i]));
+    
+    paralleldofs = make_shared<ParallelDofs>
+      (ma->GetCommunicator(), creator.MoveTable(), dimension, iscomplex);
+
     if (ma->GetCommunicator().AllReduce (ctofdof.Size(), MPI_SUM))
       paralleldofs -> AllReduceDofData (ctofdof, MPI_MAX);
   }
 
 
   bool FESpace :: IsParallel() const
-  { 
-    return paralleldofs != NULL; 
+  {
+    return ma->GetCommunicator().Size() > 1;
+    // return paralleldofs != nullptr; 
   }
 
   size_t FESpace :: GetNDofGlobal() const 
@@ -1963,6 +2032,50 @@ lot of new non-zero entries in the matrix!\n" << endl;
             ba.SetBit(d);
     return ba;
   }
+
+
+
+  ProxyNode FESpace ::
+  MakeProxyFunction (bool testfunction,
+                     const function<shared_ptr<ProxyFunction>(shared_ptr<ProxyFunction>)> & addblock) const
+  {
+    shared_ptr<FESpace> fes = dynamic_pointer_cast<FESpace> (const_cast<FESpace*>(this)->shared_from_this());
+
+    //should get virtual functions ....
+    // if (auto periodicspace = dynamic_pointer_cast<PeriodicFESpace>(fes))
+    // return periodicspace->GetBaseSpace()->MakeProxyFunction (testfunction, addblock);
+    // if (auto compressedspace = dynamic_pointer_cast<CompressedFESpace>(fes))
+    // return compressedspace->GetBaseSpace()->MakeProxyFunction (testfunction, addblock);
+    // if (auto reorderedspace = dynamic_pointer_cast<ReorderedFESpace>(fes))
+    // return reorderedspace->GetBaseSpace()->MakeProxyFunction (testfunction, addblock);
+    
+
+    auto proxy = make_shared<ProxyFunction>  (fes, testfunction, fes->IsComplex(),
+                                              fes->GetEvaluator(),
+                                              fes->GetFluxEvaluator(),
+                                              fes->GetEvaluator(BND),
+                                              fes->GetFluxEvaluator(BND),
+                                              fes->GetEvaluator(BBND),
+                                              fes->GetFluxEvaluator(BBND));
+    
+    auto add_diffops = fes->GetAdditionalEvaluators();
+    for (int i = 0; i < add_diffops.Size(); i++)
+      proxy->SetAdditionalEvaluator (add_diffops.GetName(i), add_diffops[i]);
+    
+    proxy = addblock(proxy);
+    return ProxyNode (proxy);
+  }
+  
+
+  ProxyNode FESpace :: GetProxyFunction(bool testfunction) const
+  {
+    return MakeProxyFunction
+      ( testfunction, [&] (shared_ptr<ProxyFunction> proxy) { return proxy; });
+  }
+  
+
+  
+
   
 
 
@@ -2978,7 +3091,82 @@ lot of new non-zero entries in the matrix!\n" << endl;
     // *testout << "CompoundFESpace :: UpdateCouplingDofArray() presents \n ctofdof = \n" << ctofdof << endl;
   }
 
+  ProxyNode CompoundFESpace ::
+  MakeProxyFunction (bool testfunction,
+                     const function<shared_ptr<ProxyFunction>(shared_ptr<ProxyFunction>)> & addblock) const
+  {
+    if (this->GetEvaluator())
+      return FESpace::MakeProxyFunction (testfunction, addblock);
 
+    auto fes = dynamic_pointer_cast<CompoundFESpace> (const_cast<CompoundFESpace*>(this)->shared_from_this());    
+    
+    std::vector<ProxyNode> l;
+    int nspace = fes->GetNSpaces();
+    for (int i = 0; i < nspace; i++)
+      {
+        l.push_back ((*fes)[i]->MakeProxyFunction
+                     (testfunction,
+                      [&] (shared_ptr<ProxyFunction> proxy)
+                      {
+                        // auto addcomp = [] (shared_ptr<DifferentialOperator> diffop, int comp) -> shared_ptr<CompoundDifferentialOperator>
+                        // { return diffop ? make_shared<CompoundDifferentialOperator> (diffop, comp) : nullptr; };
+                        
+                        auto block_eval = make_shared<CompoundDifferentialOperator> (proxy->Evaluator(), i);
+
+                        // auto block_deriv_eval = addcomp (proxy->DerivEvaluator(), i);
+                        shared_ptr <CompoundDifferentialOperator> block_deriv_eval = nullptr;
+                        if (proxy->DerivEvaluator() != nullptr)
+                          block_deriv_eval = make_shared<CompoundDifferentialOperator> (proxy->DerivEvaluator(), i);
+                        shared_ptr <CompoundDifferentialOperator> block_trace_eval = nullptr;
+                        if (proxy->TraceEvaluator() != nullptr)
+                          block_trace_eval = make_shared<CompoundDifferentialOperator> (proxy->TraceEvaluator(), i);
+                        shared_ptr <CompoundDifferentialOperator> block_ttrace_eval = nullptr;
+                        if (proxy->TTraceEvaluator() != nullptr)
+                          block_ttrace_eval = make_shared<CompoundDifferentialOperator> (proxy->TTraceEvaluator(),i);
+                        shared_ptr <CompoundDifferentialOperator> block_trace_deriv_eval = nullptr;
+                        if (proxy->TraceDerivEvaluator() != nullptr)
+                          block_trace_deriv_eval = make_shared<CompoundDifferentialOperator> (proxy->TraceDerivEvaluator(), i);
+                        shared_ptr <CompoundDifferentialOperator> block_ttrace_deriv_eval = nullptr;
+                        if (proxy->TTraceDerivEvaluator() != nullptr)
+                          block_ttrace_deriv_eval = make_shared<CompoundDifferentialOperator> (proxy->TTraceDerivEvaluator(),i);
+                        
+                        auto block_proxy = make_shared<ProxyFunction> (fes, testfunction, fes->IsComplex(),                                                                                                                  block_eval, block_deriv_eval, block_trace_eval, block_trace_deriv_eval,
+                                                                       block_ttrace_eval, block_ttrace_deriv_eval);
+                        
+                        SymbolTable<shared_ptr<DifferentialOperator>> add = proxy->GetAdditionalEvaluators();
+                        for (int j = 0; j < add.Size(); j++)
+                          block_proxy->SetAdditionalEvaluator(add.GetName(j),
+                                                              make_shared<CompoundDifferentialOperator> (add[j], i));
+                        
+                        block_proxy = addblock(block_proxy);
+                        return block_proxy;
+                      }));
+      }
+    return ProxyNode (std::move(l));
+  }
+  
+  shared_ptr<BaseMatrix> CompoundFESpace :: EmbeddingOperator (int spacenr) const
+  {
+    shared_ptr<BaseMatrix> emb = make_shared<Embedding> (GetNDof(), GetRange(spacenr), IsComplex());
+    if (IsParallel())
+      emb = make_shared<ParallelMatrix> (emb, spaces[spacenr] -> GetParallelDofs(),
+                                         GetParallelDofs(), C2C);
+    return emb;
+  }
+
+  
+  shared_ptr<BaseMatrix> CompoundFESpace :: RestrictionOperator (int spacenr) const
+  {
+    shared_ptr<BaseMatrix> emb = make_shared<EmbeddingTranspose> (GetNDof(), GetRange(spacenr), IsComplex());
+    if (IsParallel())
+      emb = make_shared<ParallelMatrix> (emb,
+                                         GetParallelDofs(),
+                                         spaces[spacenr] -> GetParallelDofs(),
+                                         C2C);
+    return emb;
+  }
+  
+  
 
   FiniteElement & CompoundFESpace :: GetFE (ElementId ei, Allocator & alloc) const
   {
@@ -3241,6 +3429,42 @@ lot of new non-zero entries in the matrix!\n" << endl;
 
 
 
+
+
+
+  CompoundFESpaceAllSame ::
+  CompoundFESpaceAllSame (shared_ptr<FESpace> space, int dim, const Flags & flags,
+                          bool checkflags)
+    : CompoundFESpace (space->GetMeshAccess(), flags)
+  {
+    for (int i = 0; i < dim; i++)
+      AddSpace (space);
+    
+    for (auto vb : { VOL, BND, BBND, BBBND })
+      {
+        if (auto eval = spaces[0] -> GetEvaluator(vb))
+          evaluator[vb] = make_shared<VectorDifferentialOperator> (eval, dim);
+        if (auto fluxeval = spaces[0] -> GetFluxEvaluator(vb))
+            flux_evaluator[vb] = make_shared<VectorDifferentialOperator> (fluxeval, dim);
+      }
+    
+    auto additional = spaces[0]->GetAdditionalEvaluators();
+    for (int i = 0; i < additional.Size(); i++)
+      additional_evaluators.Set (additional.GetName(i),
+                                 make_shared<VectorDifferentialOperator>(additional[i], dim));
+    
+    type = "Vector"+(*this)[0]->type;
+  }
+  
+  string CompoundFESpaceAllSame :: GetClassName () const
+  {
+    return "Vector"+ (*this)[0]->GetClassName();
+  }
+
+
+  
+
+
   
   ApplyMass :: ApplyMass (shared_ptr<FESpace> afes,
                           shared_ptr<CoefficientFunction> arho,
@@ -3375,31 +3599,7 @@ lot of new non-zero entries in the matrix!\n" << endl;
   
 
 
-  Table<int> Nodes2Table (const MeshAccess & ma,
-                          const Array<NodeId> & dofnodes)
-  {
-    size_t ndof = dofnodes.Size();
-
-    Array<int> ndistprocs(ndof);
-    ndistprocs = 0;
-    
-    for (size_t i = 0; i < ndof; i++)
-      {
-	if (dofnodes[i].GetNr() == -1) continue;
-        ndistprocs[i] = ma.GetDistantProcs (dofnodes[i]).Size();
-      }
-    
-    Table<int> dist_procs(ndistprocs);
-
-    for (size_t i = 0; i < ndof; i++)
-      {
-	if (dofnodes[i].GetNr() == -1) continue;
-	dist_procs[i] = ma.GetDistantProcs (dofnodes[i]);
-      }
-
-    return dist_procs;
-  }
-
+#ifdef OLD
 
   // #ifdef PARALLEL
   ParallelMeshDofs :: ParallelMeshDofs (shared_ptr<MeshAccess> ama, 
@@ -3411,7 +3611,7 @@ lot of new non-zero entries in the matrix!\n" << endl;
   { ; }
   // #endif
 
-
+#endif
 
 
 

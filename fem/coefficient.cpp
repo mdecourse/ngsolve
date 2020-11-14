@@ -89,8 +89,9 @@ namespace ngfem
   
   void CoefficientFunction :: PrintReportRec (ostream & ost, int level) const
   {
-    for (int i = 0; i < 2*level; i++)
-      ost << ' ';
+    ost << string(2*level, ' ');
+    // for (int i = 0; i < 2*level; i++)
+    // ost << ' ';
     ost << "coef " << GetDescription() << ","
         << (IsComplex() ? " complex" : " real");
     if (Dimensions().Size() == 1)
@@ -101,7 +102,10 @@ namespace ngfem
 
     Array<shared_ptr<CoefficientFunction>> input = InputCoefficientFunctions();
     for (int i = 0; i < input.Size(); i++)
-      input[i] -> PrintReportRec (ost, level+1);
+      if (input[i])
+        input[i] -> PrintReportRec (ost, level+1);
+      else
+        ost << string(2*level+2, ' ') << "none" << endl;
   }
   
   string CoefficientFunction :: GetDescription () const
@@ -127,7 +131,10 @@ namespace ngfem
     throw Exception(string("Operator not overloaded for CF ")+typeid(*this).name());
   }
 
-
+  void CoefficientFunction :: SetSpaceDim (int adim)
+  {
+    TraverseTree ([adim](CoefficientFunction & cf) { cf.spacedim = adim; });
+  }
   
   shared_ptr<CoefficientFunction> CoefficientFunctionNoDerivative ::
   Diff (const CoefficientFunction * var, shared_ptr<CoefficientFunction> dir) const
@@ -1132,6 +1139,16 @@ public:
     values = AutoDiffDiff<1,bool>(false);
   }
 
+  using CoefficientFunction::Operator;
+  shared_ptr<CoefficientFunction> Operator (const string & name) const override
+  {
+    if (spacedim == -1)
+      throw Exception("cannot differentiate constant since we don't know the space dimension, use 'coef.spacedim=dim'");
+    if (name != "grad")
+      throw Exception ("cannot apply operator "+name+" for constant");
+    return ZeroCF ( Array( { spacedim } ) );
+  }
+  
   shared_ptr<CoefficientFunction> Diff (const CoefficientFunction * var,
                                           shared_ptr<CoefficientFunction> dir) const override
   {
@@ -2963,6 +2980,8 @@ public:
   {
     SetDimensions (ngstd::INT<2> (dim, dim) );
   }
+  // For archive
+  IdentityCoefficientFunction() = default;
 
   void DoArchive(Archive& ar) override
   {
@@ -4145,6 +4164,13 @@ cl_BinaryOpCF<GenericPlus>::Diff(const CoefficientFunction * var,
   return c1->Diff(var,dir) + c2->Diff(var,dir);
 }
 
+template <> 
+shared_ptr<CoefficientFunction>
+cl_BinaryOpCF<GenericPlus>::Operator(const string & name) const
+{
+  return c1->Operator(name) + c2->Operator(name);
+}
+
 shared_ptr<CoefficientFunction> operator+ (shared_ptr<CoefficientFunction> c1, shared_ptr<CoefficientFunction> c2)
 {
   if (c1->GetDescription() == "ZeroCF")
@@ -4170,6 +4196,14 @@ cl_BinaryOpCF<GenericMinus>::Diff(const CoefficientFunction * var,
   return c1->Diff(var,dir) - c2->Diff(var,dir);
 }
 
+template <> 
+shared_ptr<CoefficientFunction>
+cl_BinaryOpCF<GenericMinus>::Operator(const string & name) const
+{
+  return c1->Operator(name) - c2->Operator(name);
+}
+
+
 shared_ptr<CoefficientFunction> operator- (shared_ptr<CoefficientFunction> c1, shared_ptr<CoefficientFunction> c2)
 {
   if (c1->GetDescription() == "ZeroCF")
@@ -4187,11 +4221,32 @@ shared_ptr<CoefficientFunction> operator- (shared_ptr<CoefficientFunction> c1, s
 
 template <> 
 shared_ptr<CoefficientFunction>
+cl_BinaryOpCF<GenericMult>::Operator(const string & name) const
+{
+  if (c1->Dimension() != 1 || c2->Dimension() != 1)
+    throw Exception ("can only differentiate scalar multiplication");
+  if (name != "grad")
+    throw Exception ("can only from 'grad' operator of product");
+  return c1->Operator(name) * c2  + c1 * c2->Operator(name);
+}
+
+
+shared_ptr<CoefficientFunction> CWMult (shared_ptr<CoefficientFunction> cf1,
+                                        shared_ptr<CoefficientFunction> cf2)
+{
+  return BinaryOpCF (cf1, cf2, gen_mult, "*");
+}
+
+
+template <> 
+shared_ptr<CoefficientFunction>
 cl_BinaryOpCF<GenericMult>::Diff(const CoefficientFunction * var,
                                    shared_ptr<CoefficientFunction> dir) const
 {
   if (var == this) return dir;    
-  return c1->Diff(var,dir)*c2 + c1*c2->Diff(var,dir);
+  //return c1->Diff(var,dir)*c2 + c1*c2->Diff(var,dir); // would replace point-wise mult by InnerProduct
+  return CWMult (c1->Diff(var,dir), c2) + 
+    CWMult(c1, c2->Diff(var,dir));
 }
 
 template <> 
@@ -4200,7 +4255,10 @@ cl_BinaryOpCF<GenericDiv>::Diff(const CoefficientFunction * var,
                                    shared_ptr<CoefficientFunction> dir) const
 {
   if (var == this) return dir;
-  return (c1->Diff(var,dir)*c2 - c1*c2->Diff(var,dir)) / (c2*c2);
+  // return (c1->Diff(var,dir)*c2 - c1*c2->Diff(var,dir)) / (c2*c2);
+  return (BinaryOpCF (c1->Diff(var,dir), c2, gen_mult, "*") -
+          BinaryOpCF (c1, c2->Diff(var,dir), gen_mult, "*")) /
+          BinaryOpCF (c2, c2, gen_mult, "*");
 }
 
 
@@ -4659,7 +4717,8 @@ public:
     for (auto & cf : ci)
       if (cf && cf->IsComplex()) is_complex = true;
     for (auto & cf : ci)
-      if (cf) SetDimensions(cf->Dimensions());
+      if (cf)
+        SetDimensions(cf->Dimensions());
 
     elementwise_constant = true;
     for (auto cf : ci)
@@ -4735,6 +4794,18 @@ public:
       cfa.Append (cf);
     return Array<shared_ptr<CoefficientFunction>>(cfa);
   } 
+
+  shared_ptr<CoefficientFunction> Operator (const string & name) const override
+  {
+    Array<shared_ptr<CoefficientFunction>> cfop;
+    
+    for (auto & cf : ci)
+      if (cf)
+        cfop.Append (cf->Operator(name));
+      else
+        cfop.Append (nullptr);
+    return MakeDomainWiseCoefficientFunction(move (cfop));
+  }
   
   shared_ptr<CoefficientFunction> Diff (const CoefficientFunction * var,
                                           shared_ptr<CoefficientFunction> dir) const override
@@ -4870,7 +4941,7 @@ public:
   MakeDomainWiseCoefficientFunction (Array<shared_ptr<CoefficientFunction>> aci)
   {
     for(auto cf : aci)
-      if (cf->GetDescription() != "ZeroCF")
+      if (cf && cf->GetDescription() != "ZeroCF")
         return make_shared<DomainWiseCoefficientFunction> (move (aci));
     return ZeroCF(Array<int>({static_cast<int>(aci.Size())}));
   }
@@ -5054,7 +5125,9 @@ class IfPosCoefficientFunction : public T_CoefficientFunction<IfPosCoefficientFu
     ///
     virtual double Evaluate (const BaseMappedIntegrationPoint & ip) const override
     {
-      if (cf_if->Evaluate(ip) > 0)
+      Vec<1> val;
+      cf_if->Evaluate(ip, val);
+      if (val(0) > 0)
         return cf_then->Evaluate(ip);
       else
         return cf_else->Evaluate(ip);      
@@ -5062,7 +5135,9 @@ class IfPosCoefficientFunction : public T_CoefficientFunction<IfPosCoefficientFu
 
     virtual void Evaluate (const BaseMappedIntegrationPoint& ip, FlatVector<double> values) const override
     {
-      if(cf_if->Evaluate(ip) > 0)
+      Vec<1> val;
+      cf_if->Evaluate(ip, val);
+      if(val(0) > 0)
         cf_then->Evaluate(ip,values);
       else
         cf_else->Evaluate(ip,values);
@@ -5428,6 +5503,13 @@ class IfPosCoefficientFunction : public T_CoefficientFunction<IfPosCoefficientFu
       auto v2 = input[2];
       values = v1+v2;
     }
+
+    shared_ptr<CoefficientFunction> Diff (const CoefficientFunction * var,
+                                          shared_ptr<CoefficientFunction> dir) const override
+    {
+      if (this == var) return dir;
+      return IfPos (cf_if, cf_then->Diff(var, dir), cf_else->Diff(var, dir));
+    }  
   };
   
   extern
@@ -5778,6 +5860,22 @@ public:
     }
     */
 
+    using CoefficientFunction::Operator;
+    shared_ptr<CoefficientFunction> Operator (const string & name) const override
+    {
+      if (spacedim == -1)
+        throw Exception("cannot differentiate coordinate since we don't know the space dimension, use 'coef.spacedim=dim'");
+      if (name != "grad")
+        throw Exception ("cannot apply operator "+name+" for coordinate");
+      
+      Array<shared_ptr<CoefficientFunction>> funcs(spacedim);
+      funcs = make_shared<ConstantCoefficientFunction> (0);
+      funcs[dir] = make_shared<ConstantCoefficientFunction> (1);
+      return MakeVectorialCoefficientFunction (move(funcs));
+    }
+    
+    
+    
     shared_ptr<CoefficientFunction>
     Diff (const CoefficientFunction * var, shared_ptr<CoefficientFunction> dirdiff) const override
     {

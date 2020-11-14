@@ -317,6 +317,17 @@ namespace ngla
   }
 
   
+  BaseMatrix::OperatorInfo EmbeddedMatrix :: GetOperatorInfo () const
+  {
+    OperatorInfo info;
+    info.name = "EmbeddedMatrix";
+    info.height = Height();
+    info.width = Width();
+    info.childs += mat.get();
+    return info;
+  }
+
+  
   void EmbeddedMatrix :: Mult (const BaseVector & x, BaseVector & y) const
   {
     if (Height() != y.Size()) throw Exception("Embedded matrix, h = "+ToString(Height())
@@ -372,6 +383,15 @@ namespace ngla
   }
 
 
+  BaseMatrix::OperatorInfo EmbeddedTransposeMatrix :: GetOperatorInfo () const
+  {
+    OperatorInfo info;
+    info.name = "EmbeddedTransposeMatrix";
+    info.height = Height();
+    info.width = Width();
+    info.childs += mat.get();
+    return info;
+  }
 
   void EmbeddedTransposeMatrix :: Mult (const BaseVector & x, BaseVector & y) const
   {
@@ -405,7 +425,7 @@ namespace ngla
   
   template <class TVR, class TVC>
   Real2ComplexMatrix<TVR,TVC> :: 
-  Real2ComplexMatrix (const BaseMatrix * arealmatrix)
+  Real2ComplexMatrix (shared_ptr<BaseMatrix> arealmatrix)
     : hx(0), hy(0)
   { 
     SetMatrix (arealmatrix); 
@@ -413,7 +433,7 @@ namespace ngla
   
   template <class TVR, class TVC>
   void Real2ComplexMatrix<TVR,TVC> ::
-  SetMatrix (const BaseMatrix * arealmatrix)
+  SetMatrix (shared_ptr<BaseMatrix> arealmatrix)
   {
     realmatrix = arealmatrix;
     if (realmatrix)
@@ -795,7 +815,7 @@ namespace ngla
     for(auto col:Range(w)) {
       vecs[col] = col_reps[col]->CreateRowVector();
     }
-    return make_shared<BlockVector>(vecs);
+    return make_unique<BlockVector>(vecs);
   }
   
   AutoVector BlockMatrix :: CreateColVector () const {
@@ -803,9 +823,120 @@ namespace ngla
     for (auto row:Range(h)) {
       vecs[row] = row_reps[row]->CreateColVector();
     }
-    return make_shared<BlockVector>(vecs);
+    return make_unique<BlockVector>(vecs);
   }
 
+
+  string PS(PARALLEL_STATUS stat)
+  {
+    switch (stat)
+      {
+      case DISTRIBUTED: return "distributed";
+      case CUMULATED: return "cumulated";
+      default: return "sequential";
+      }
+  }
+  LoggingMatrix :: LoggingMatrix (shared_ptr<BaseMatrix> amat, string alabel, string logfile,
+                                  optional<NgMPI_Comm> acomm)
+    : mat(amat), label(alabel), comm(acomm)
+  {
+    if(logfile=="stdout")
+      out = make_unique<ostream>(cout.rdbuf());
+    else if(logfile=="stderr")
+      out = make_unique<ostream>(cerr.rdbuf());
+    else
+      out = make_unique<ofstream>(logfile);
+  }
+      
+  LoggingMatrix :: ~LoggingMatrix () { } 
+  
+  BaseVector & LoggingMatrix :: AsVector()
+  {
+    *out << "matrix '" << label << "' AsVector called" << endl;
+    return mat->AsVector();
+  }
+  
+  const BaseVector & LoggingMatrix :: AsVector() const
+  {
+    *out << "matrix '" << label << "' AsVector called" << endl;
+    return mat->AsVector();
+  }
+  
+  void LoggingMatrix :: SetZero()
+  {
+    mat->SetZero();
+  }
+
+  AutoVector LoggingMatrix :: CreateRowVector () const 
+  {
+    unique_ptr<BaseVector> vec = mat->CreateRowVector();
+    *out << "matrix '" << label << "' CreateRowVector "
+         << "size: " << vec->Size() << " " << PS(vec->GetParallelStatus()) << endl;
+    return move(vec);
+  }
+  
+  AutoVector LoggingMatrix :: CreateColVector () const
+  {
+    unique_ptr<BaseVector> vec = mat->CreateColVector();
+    *out << "matrix '" << label << "' CreateColVector "
+         << "size: " << vec->Size() << " " << PS(vec->GetParallelStatus()) << endl;
+    return move(vec);
+  }
+
+  
+  void LoggingMatrix :: Mult (const BaseVector & x, BaseVector & y) const
+  {
+    if (comm.has_value()) comm->Barrier();
+    *out << "matrix '" << label << "' Mult: " << typeid(*mat).name() << " "
+         << "x: " << x.Size() << " " << PS(x.GetParallelStatus()) << " "
+         << "y: " << y.Size() << " " << PS(y.GetParallelStatus()) << endl;
+    if (comm.has_value()) comm->Barrier();
+    
+    mat->Mult(x,y);
+    
+    if (comm.has_value()) comm->Barrier();
+    *out << "matrix '" << label << "' Mult complete" << endl;
+    if (comm.has_value()) comm->Barrier();        
+  }
+  
+  void LoggingMatrix :: MultTrans (const BaseVector & x, BaseVector & y) const
+  {
+    mat->MultTrans (x,y);
+  }
+  void LoggingMatrix :: MultAdd (double s, const BaseVector & x, BaseVector & y) const
+  {
+    if (comm.has_value()) comm->Barrier();    
+    *out << "matrix '" << label << "' MultAdd: "
+         << "x: " << x.Size() << " " << PS(x.GetParallelStatus()) << " "
+         << "y: " << y.Size() << " " << PS(y.GetParallelStatus()) << endl;
+    if (comm.has_value()) comm->Barrier();
+    
+    mat->MultAdd(s,x,y);
+    
+    if (comm.has_value()) comm->Barrier();    
+    *out << "matrix '" << label << "' MultAdd complete" << endl;
+    if (comm.has_value()) comm->Barrier();        
+  }
+  void LoggingMatrix :: MultAdd (Complex s, const BaseVector & x, BaseVector & y) const
+  {
+    mat->MultAdd(s,x,y);
+  }
+  void LoggingMatrix :: MultTransAdd (double s, const BaseVector & x, BaseVector & y) const
+  {
+    mat->MultTransAdd (s,x,y);
+  }
+  void LoggingMatrix :: MultTransAdd (Complex s, const BaseVector & x, BaseVector & y) const
+  {
+    mat->MultTransAdd (s,x,y);
+  }
+  void LoggingMatrix :: MultConjTransAdd (Complex s, const BaseVector & x, BaseVector & y) const
+  {
+    mat->MultConjTransAdd (s,x,y);
+  }
+  void LoggingMatrix :: MultAdd (FlatVector<double> alpha, const MultiVector & x, MultiVector & y) const
+  {
+    mat->MultAdd (alpha, x, y);
+  }
 
   
 }

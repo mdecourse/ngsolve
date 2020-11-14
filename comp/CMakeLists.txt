@@ -19,11 +19,15 @@ add_library( ngcomp ${NGS_LIB_TYPE}
         ../multigrid/smoother.cpp contact.cpp localsolve.cpp interpolate.cpp
         )
 
-target_include_directories(ngcomp PRIVATE ${NETGEN_TCL_INCLUDE_PATH} ${NETGEN_PYTHON_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/../ngstd)      
+target_include_directories(ngcomp PRIVATE ${NETGEN_TCL_INCLUDE_PATH} ${NETGEN_PYTHON_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/../ngstd ${CMAKE_CURRENT_SOURCE_DIR}/../linalg)
 
-target_link_libraries (ngcomp PUBLIC nglib ngfem ngla ngbla ngstd ${MPI_CXX_LIBRARIES} PRIVATE netgen_python ${HYPRE_LIBRARIES})
+target_link_libraries (ngcomp PUBLIC ngfem ngla ngbla ngstd ${MPI_CXX_LIBRARIES} PRIVATE netgen_python ${HYPRE_LIBRARIES})
 target_link_libraries(ngcomp ${LAPACK_CMAKE_LINK_INTERFACE} ${LAPACK_LIBRARIES})
 install( TARGETS ngcomp ${ngs_install_dir} )
+
+if(NETGEN_USE_GUI)
+  target_link_libraries(ngcomp PRIVATE ${NETGEN_OPENGL_LIBRARIES})
+endif(NETGEN_USE_GUI)
 
 install( FILES
         bilinearform.hpp comp.hpp facetfespace.hpp	   

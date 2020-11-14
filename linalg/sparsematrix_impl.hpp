@@ -23,7 +23,8 @@ namespace ngla
   {
 #ifdef __GNUC__
     size_t fi = firsti[rownr], fin = firsti[rownr+1];
-    int * pi = &colnr[fi], * pin = &colnr[fin];
+    // int * pi = &colnr[fi], * pin = &colnr[fin];
+    int *pi = colnr.Data()+fi, *pin = colnr.Data()+fin;
     while (pi < pin)
       {
         _mm_prefetch (reinterpret_cast<void*>(pi), _MM_HINT_T2);
@@ -110,11 +111,17 @@ namespace ngla
     static Timer t("SparseMatrix::SetZero (taskhandler)");
     t.AddFlops (this->NZE());
     RegionTimer reg(t);
-        
+
+    /*
     ParallelFor (balance, [&](int row) 
                  {
                    data.Range(firsti[row], firsti[row+1]) = TM(0.0);
                  });
+    */
+    ParallelForRange (balance, [&](IntRange r) 
+                      {
+                        data.Range(firsti[r.First()], firsti[r.Next()]) = TM(0.0);
+                      });
     
   }
   
@@ -133,6 +140,17 @@ namespace ngla
     static Timer t("SparseMatrix::MultAdd"); RegionTimer reg(t);
     t.AddFlops (this->NZE());
 
+    ParallelForRange
+      (balance, [&] (IntRange myrange)
+       {
+         FlatVector<TVX> fx = x.FV<TVX>(); 
+         FlatVector<TVY> fy = y.FV<TVY>(); 
+
+         for (auto i : myrange)
+           fy(i) += s * RowTimesVector (i, fx);
+       });
+    
+#ifdef OLD
     if (task_manager)
       {
 	FlatVector<TVX> fx = x.FV<TVX>(); 
@@ -163,7 +181,9 @@ namespace ngla
     int h = this->Height();
     for (int i = 0; i < h; i++)
       fy(i) += s * RowTimesVector (i, fx);
+#endif
 
+    
   }
 
   template <class TM, class TV_ROW, class TV_COL>
@@ -254,8 +274,14 @@ namespace ngla
       AddRowConjTransToVector (i, ConvertTo<TSCAL> (s)*fx(i), fy);
   }
 
-
+  template <class TM, class TV_ROW, class TV_COL>
+  void SparseMatrix<TM,TV_ROW,TV_COL> ::
+  MultAdd (FlatVector<double> alpha, const MultiVector & x, MultiVector & y) const
+  {
+    BaseMatrix::MultAdd (alpha, x, y);
+  }
   
+
   
   template <class TM, class TV_ROW, class TV_COL>
   void SparseMatrix<TM,TV_ROW,TV_COL> :: DoArchive (Archive & ar)
@@ -446,7 +472,7 @@ namespace ngla
   CreateVector () const
   {
     if (this->size==this->width)
-      return make_shared<VVector<TVY>> (this->size);
+      return make_unique<VVector<TVY>> (this->size);
     throw Exception ("SparseMatrix::CreateVector for rectangular does not make sense, use either CreateColVector or CreateRowVector");
   }
 
@@ -454,14 +480,14 @@ namespace ngla
   AutoVector SparseMatrix<TM,TV_ROW,TV_COL> ::
   CreateRowVector () const
   {
-    return make_shared<VVector<TVX>> (this->width);
+    return make_unique<VVector<TVX>> (this->width);
   }
 
   template <class TM, class TV_ROW, class TV_COL>
   AutoVector SparseMatrix<TM,TV_ROW,TV_COL> ::
   CreateColVector () const
   {
-    return make_shared<VVector<TVY>> (this->size);
+    return make_unique<VVector<TVY>> (this->size);
   }
 
 
@@ -599,8 +625,44 @@ namespace ngla
     return cmat;
   }
 
+  template <class TM>
+  shared_ptr<BaseSparseMatrix> SparseMatrixTM<TM> ::
+  CreateTransposeTM (const function<shared_ptr<SparseMatrixTM<decltype(Trans(TM()))>>(const Array<int>&,int)> & creator) const
+  {
+    Array<int> cnt(this->Width());
+    cnt = 0;
+    ParallelFor (this->Height(), [&] (int i)
+                 {
+                   for (int c : this->GetRowIndices(i))
+                     AsAtomic (cnt[c]) ++;
+                 });
+
+    auto trans = creator(cnt, this->Height());
+
+    cnt = 0;
+    ParallelFor (this->Height(), [&] (int i)
+                 {
+                   for (int ci : Range(this->GetRowIndices(i)))
+                     {
+                       int c = this->GetRowIndices(i)[ci];
+                       int pos = AsAtomic(cnt[c])++;
+                       trans -> GetRowIndices(c)[pos] = i;
+                       trans -> GetRowValues(c)[pos] = Trans(this->GetRowValues(i)[ci]);
+                     }
+                 });
+
+    ParallelFor (trans->Height(), [&] (int r)
+                 {
+                   auto rowvals = trans->GetRowValues(r);
+                   BubbleSort (trans->GetRowIndices(r),
+                               FlatArray(rowvals.Size(), rowvals.Data()));
+                 });
+
+    return trans;
+  }
 
 
+  
 
   template <class TM>
   void SparseMatrixTM<TM> ::

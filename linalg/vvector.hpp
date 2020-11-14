@@ -59,7 +59,7 @@ namespace ngla
     virtual Array<MemoryUsage> GetMemoryUsage () const override;
 
     
-    virtual AutoVector Range (size_t begin, size_t end) const override;
+    // virtual AutoVector Range (size_t begin, size_t end) const override;
     virtual AutoVector Range (T_Range<size_t> range) const override;
 
     template<typename TIND, typename std::enable_if<std::is_integral<TIND>::value, int>::type = 0>
@@ -69,7 +69,8 @@ namespace ngla
     }
 
     virtual AutoVector CreateVector () const override;
-
+    virtual unique_ptr<MultiVector> CreateMultiVector (size_t cnt) const override;
+    
     virtual ostream & Print (ostream & ost) const override;
   };
 

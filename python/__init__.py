@@ -14,7 +14,7 @@ from .ngslib import __version__, ngstd, bla, la, fem, comp, solve
 
 from netgen import Redraw
 
-from pyngcore import BitArray, TaskManager, SetNumThreads
+from pyngcore import BitArray, TaskManager, SetNumThreads, PajeTrace
 from .ngstd import Timers, Timer, IntRange
 from .bla import Matrix, Vector, InnerProduct, Norm
 from .la import BaseMatrix, BaseVector, BlockVector, MultiVector, BlockMatrix, \
@@ -29,8 +29,8 @@ from .fem import BFI, LFI, CoefficientFunction, Parameter, ParameterC, ET, \
     IntegrationRule, IfPos, VoxelCoefficient, CacheCF
 from .comp import VOL, BND, BBND, BBBND, COUPLING_TYPE, ElementId, \
     BilinearForm, LinearForm, GridFunction, Preconditioner, \
-    MultiGridPreconditioner, ElementId, FESpace, H1, HCurl, \
-    HDiv, L2, VectorH1, VectorL2, SurfaceL2, HDivDiv, HCurlCurl, HCurlDiv, \
+    MultiGridPreconditioner, ElementId, FESpace, ProductSpace, H1, HCurl, \
+    HDiv, L2, VectorH1, VectorL2, SurfaceL2, TangentialSurfaceL2, HDivDiv, HCurlCurl, HCurlDiv, \
     HDivSurface, HDivDivSurface, FacetFESpace, TangentialFacetFESpace, \
     NormalFacetFESpace, \
     FacetSurface, VectorSurfaceL2, VectorFacetFESpace, VectorFacetSurface, \
@@ -46,6 +46,20 @@ from .utils import x, y, z, dx, ds, grad, Grad, curl, div, PyId, PyTrace, \
     PyDet, PyCross, PyCof, PyInv, PySym, PySkew, OuterProduct, TimeFunction, Normalize
 from . import solvers
 
+CF = CoefficientFunction
+
+from builtins import sum as builtin_sum
+def sum(iterable, start=None):
+    """NGSolve sum function that uses the first element of an iterable as
+start argument if no start argument is provided."""
+    if start is not None:
+        return builtin_sum(iterable, start)
+    generator = iter(iterable)
+    try:
+        first = next(generator)
+    except StopIteration:
+        return 0
+    return builtin_sum(generator, first)
 
 from .timing import Timing
 

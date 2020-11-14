@@ -109,6 +109,7 @@ nr : int
     auto & Mesh() { return ma; }
     MeshNode operator++ (int) { return MeshNode(NodeId::operator++(0),ma); }
     MeshNode operator++ () { return MeshNode(NodeId::operator++(), ma); }
+    MeshNode operator+ (size_t i) { return MeshNode(NodeId::operator+(i), ma); }
   };
 
   py::class_<MeshNode, NodeId> (m, "MeshNode", "a node within a mesh")
@@ -241,6 +242,8 @@ nr : int
     .def("__iter__", [] (ngstd::T_Range<MeshNode> & r)
          { return py::make_iterator(r.begin(), r.end()); },
          py::keep_alive<0,1>())
+    .def("__getitem__", [](ngstd::T_Range<MeshNode> & r, size_t i)
+         { return r.First()+i; })
     ;
 
 
@@ -313,12 +316,35 @@ nr : int
   py::class_<Region> (m, "Region", "a subset of volume or boundary elements")
     .def(py::init<shared_ptr<MeshAccess>,VorB,string>(), py::arg("mesh"), py::arg("vb"), py::arg("name"))
     .def(py::init<shared_ptr<MeshAccess>,VorB,BitArray>(), py::arg("mesh"), py::arg("vb"), py::arg("mask"))
-    .def("Mask",[](Region & reg)->BitArray { return reg.Mask(); }, "BitArray mask of the region")
+    .def("Mask",[](Region & reg) { return reg.MaskPtr(); }, "BitArray mask of the region")
     .def("VB", [](Region & reg) { return VorB(reg); }, "VorB of the region")
+    .def("Split", [](Region& self)
+    {
+      py::list regions;
+      for(auto i : Range(self.Mask()))
+        if(self.Mask()[i])
+          {
+            Region reg(self.Mesh(), self.VB());
+            reg.Mask().SetBit(i);
+            regions.append(reg);
+          }
+      return regions;
+    }, "Split region in domains/surfaces/...")
+    .def("Neighbours", &Region::GetNeighbours)
+    .def("Boundaries", &Region::GetBoundaries)
+    .def("Elements", [](const Region& self)
+    {
+      auto range = self.GetElements();
+      return py::make_iterator(range.begin(), range.end());
+    }, py::keep_alive<0,1>())
+    .def("__hash__", &Region::Hash)
+    .def("__eq__", &Region::operator==)
     .def(py::self + py::self)
     .def(py::self + string())
     .def(py::self - py::self)
     .def(py::self - string())
+    .def(py::self * py::self)
+    .def(py::self * string())
     .def(~py::self)
     ;
 
@@ -607,6 +633,61 @@ mesh (netgen.Mesh): a mesh generated from Netgen
 	  },
 	 (py::arg("self"), py::arg("pattern")),
 	 "Return co dim 3 boundary mesh-region matching the given regex pattern")
+
+    .def("RegionCF", [](MeshAccess& self, VorB vb,
+                        py::dict py_svals,
+                        shared_ptr<CoefficientFunction> default_value)
+    {
+      Array<pair<variant<string, Region>, shared_ptr<CoefficientFunction>>> vals;
+      for(auto val : py_svals)
+        vals.Append(make_pair(py::cast<variant<string, Region>>(val.first),
+                              py::cast<shared_ptr<CoefficientFunction>>(val.second)));
+      return self.RegionCF(vb, default_value, move(vals));
+    }, py::arg("VorB"), py::arg("value"), py::arg("default") = nullptr,
+         R"delimiter(Region wise CoefficientFunction.
+First argument is VorB, defining the co-dimension,
+second argument is a dict from either region names or Region objects to
+CoefficientFunction (-values). Later given names/regions override earlier
+values. Optional last argument (default) is the value for not given regions.
+>>> sigma = mesh.RegionCF(VOL, { "steel_.*" : 2e6 }, default=0)
+will create a CF being 2e6 on all domains starting with 'steel_' and 0 elsewhere.
+)delimiter")
+
+    .def("MaterialCF", [](MeshAccess& self,
+                          py::dict py_svals,
+                          shared_ptr<CoefficientFunction> default_value)
+    {
+      Array<pair<variant<string, Region>, shared_ptr<CoefficientFunction>>> vals;
+      for(auto val : py_svals)
+        vals.Append(make_pair(py::cast<variant<string, Region>>(val.first),
+                              py::cast<shared_ptr<CoefficientFunction>>(val.second)));
+      return self.MaterialCF(default_value, move(vals));
+    }, py::arg("values"), py::arg("default") = nullptr,
+                  R"delimiter(Domain wise CoefficientFunction.
+First argument is a dict from either material names or Region objects to
+CoefficientFunction (-values). Later given names/regions override earlier
+values. Optional last argument (default) is the value for not given materials.
+>>> sigma = mesh.MaterialCF({ "steel_.*" : 2e6 }, default=0)
+will create a CF being 2e6 on all domains starting with 'steel_' and 0 elsewhere.
+)delimiter")
+
+    .def("BoundaryCF", [](MeshAccess& self,
+                          py::dict py_svals,
+                          shared_ptr<CoefficientFunction> default_value)
+    {
+      Array<pair<variant<string, Region>, shared_ptr<CoefficientFunction>>> vals;
+      for(auto val : py_svals)
+        vals.Append(make_pair(py::cast<variant<string, Region>>(val.first),
+                              py::cast<shared_ptr<CoefficientFunction>>(val.second)));
+      return self.BoundaryCF(default_value, move(vals));
+    }, py::arg("values"), py::arg("default") = nullptr,
+         R"delimiter(Boundary wise CoefficientFunction.
+First argument is a dict from either boundary names or Region objects to
+CoefficientFunction (-values). Later given names/regions override earlier
+values. Optional last argument (default) is the value for not given boundaries.
+>>> penalty = mesh.BoundaryCF({ "top" : 1e6 }, default=0)
+will create a CF being 1e6 on the top boundary and 0. elsewhere.
+)delimiter")
 
     // TODO: explain how to mark elements
     .def("Refine",

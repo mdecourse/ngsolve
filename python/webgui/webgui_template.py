@@ -64,7 +64,7 @@ html_template = """
 
 
 class WebGLScene:
-    def __init__(self, cf, mesh, order, min_, max_, draw_vol, draw_surf, autoscale, deformation, interpolate_multidim, animate):
+    def __init__(self, cf, mesh, order, min_, max_, draw_vol, draw_surf, autoscale, deformation, interpolate_multidim, animate, clipping, vectors, on_init, eval_function, eval_):
         from IPython.display import display, Javascript
         import threading
         self.cf = cf
@@ -77,10 +77,12 @@ class WebGLScene:
         self.autoscale = autoscale
         self.interpolate_multidim = interpolate_multidim
         self.animate = animate
+        self.clipping = clipping
+        self.vectors = vectors
+        self.on_init = on_init
+        self.eval_function = eval_function
+        self.eval_ = eval_
 
-        if isinstance(deformation, ngs.CoefficientFunction):
-            if deformation.dim==2:
-                deformation = ngs.CoefficientFunction((deformation, 0.0))
         self.deformation = deformation
 
     def GetData(self, set_minmax=True):
@@ -92,10 +94,21 @@ class WebGLScene:
             gf = ngs.GridFunction(self.cf.space)
             dim = len(self.cf.vecs)
 
+            if isinstance(self.deformation, ngs.GridFunction) and len(self.deformation.vecs)==dim:
+                md_deformation = True
+                deformation = ngs.GridFunction(self.deformation.space)
+            else:
+                md_deformation = False
+                deformation = self.deformation
+
             data = []
             for i in range(1,dim):
                 gf.vec.data = self.cf.vecs[i]
-                data.append(BuildRenderData(self.mesh, gf, self.order, draw_surf=self.draw_surf, draw_vol=self.draw_vol, deformation=self.deformation))
+
+                if md_deformation:
+                    deformation.vec.data = self.deformation.vecs[i]
+
+                data.append(BuildRenderData(self.mesh, gf, self.order, draw_surf=self.draw_surf, draw_vol=self.draw_vol, deformation=deformation))
             d['multidim_data'] = data
             d['multidim_interpolate'] = self.interpolate_multidim
             d['multidim_animate'] = self.animate
@@ -107,6 +120,48 @@ class WebGLScene:
             if self.max is not None:
                 d['funcmax'] = self.max
             d['autoscale'] = self.autoscale
+
+        if self.clipping is not None:
+            d['clipping'] = True
+            if isinstance(self.clipping, dict):
+                allowed_args = ("x", "y", "z", "dist", "function", "pnt", "vec")
+                if "vec" in self.clipping:
+                    vec = self.clipping["vec"]
+                    self.clipping["x"] = vec[0]
+                    self.clipping["y"] = vec[1]
+                    self.clipping["z"] = vec[2]
+                if "pnt" in self.clipping:
+                    d['mesh_center'] = list(self.clipping["pnt"])
+                for name, val in self.clipping.items():
+                    if not (name in allowed_args):
+                        raise Exception('Only {} allowed as arguments for clipping!'.format(", ".join(allowed_args)))
+                    d['clipping_' + name] = val
+
+        if self.vectors is not None:
+            d['vectors'] = True
+            if isinstance(self.vectors, dict):
+                for name, val in self.vectors.items():
+                    if not (name in ("grid_size", "offset")):
+                        raise Exception('Only "grid_size" and "offset" allowed as arguments for vectors!')
+                    d['vectors_' + name] = val
+
+        if self.on_init:
+            d['on_init'] = self.on_init
+
+        if self.eval_function:
+            d['user_eval_function'] = self.eval_function
+
+        # see shaders/utils.h for value explanation (function_mode)
+        eval_ = self.eval_
+        if eval_ is not None:
+            if isinstance(eval_, int):
+                d['eval'] = eval_
+            elif eval_ == 'norm':
+                d['eval'] = 3
+            elif eval_ == 'real':
+                d['eval'] = 5
+            elif eval_ == 'imag':
+                d['eval'] = 6
 
         return d
 
@@ -153,6 +208,9 @@ timer4 = ngs.Timer("func")
     
 def BuildRenderData(mesh, func, order=2, draw_surf=True, draw_vol=True, deformation=None):
     timer.Start()
+
+    if isinstance(deformation, ngs.CoefficientFunction) and deformation.dim==2:
+        deformation = ngs.CoefficientFunction((deformation, 0.0))
 
     #TODO: handle quads and non-smooth functions
     #TODO: subdivision
@@ -418,7 +476,7 @@ def BuildRenderData(mesh, func, order=2, draw_surf=True, draw_vol=True, deformat
     timer.Stop()
     return d
 
-def Draw(mesh_or_func, mesh_or_none=None, name='function', order=2, min=None, max=None, draw_vol=True, draw_surf=True, autoscale=True, deformation=False, interpolate_multidim=False, animate=False):
+def Draw(mesh_or_func, mesh_or_none=None, name='function', order=2, min=None, max=None, draw_vol=True, draw_surf=True, autoscale=True, deformation=False, interpolate_multidim=False, animate=False, clipping=None, vectors=None, js_code=None, eval_function=None, eval=None):
     if isinstance(mesh_or_func, ngs.Mesh):
         mesh = mesh_or_func
         func = None
@@ -431,7 +489,7 @@ def Draw(mesh_or_func, mesh_or_none=None, name='function', order=2, min=None, ma
         func = mesh_or_func
         mesh = mesh_or_none or func.space.mesh
         
-    scene = WebGLScene(func, mesh, order, min_=min, max_=max, draw_vol=draw_vol, draw_surf=draw_surf, autoscale=autoscale, deformation=deformation, interpolate_multidim=interpolate_multidim, animate=animate)
+    scene = WebGLScene(func, mesh, order, min_=min, max_=max, draw_vol=draw_vol, draw_surf=draw_surf, autoscale=autoscale, deformation=deformation, interpolate_multidim=interpolate_multidim, animate=animate, clipping=clipping, vectors=vectors, on_init=js_code, eval_function=eval_function, eval_=eval)
     if _IN_IPYTHON:
         if _IN_GOOGLE_COLAB:
             from IPython.display import display, HTML

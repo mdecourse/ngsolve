@@ -62,12 +62,12 @@ public:
   const shared_ptr<DifferentialOperator> & TTraceEvaluator() const { return ttrace_evaluator; }
   const shared_ptr<DifferentialOperator> & TTraceDerivEvaluator() const { return ttrace_deriv_evaluator; }
 
-  shared_ptr<ProxyFunction> Deriv() const;
+  NGS_DLL_HEADER shared_ptr<ProxyFunction> Deriv() const;
   NGS_DLL_HEADER shared_ptr<ProxyFunction> Trace() const;
 
-  shared_ptr<ProxyFunction> Other(shared_ptr<CoefficientFunction> _boundary_values) const;
+  NGS_DLL_HEADER shared_ptr<ProxyFunction> Other(shared_ptr<CoefficientFunction> _boundary_values) const;
 
-  const shared_ptr<CoefficientFunction> & BoundaryValues() const { return boundary_values; } 
+  NGS_DLL_HEADER const shared_ptr<CoefficientFunction> & BoundaryValues() const { return boundary_values; } 
 
   void SetAdditionalEvaluator (string name, shared_ptr<DifferentialOperator> diffop)
   {
@@ -86,12 +86,13 @@ public:
     return additional_diffops;
   }
 
-  virtual shared_ptr<ProxyFunction> GetAdditionalProxy (string name) const;
+  NGS_DLL_HEADER virtual shared_ptr<ProxyFunction> GetAdditionalProxy (string name) const;
   
-  shared_ptr<CoefficientFunction> Operator (const string & name) const override;
-  shared_ptr<CoefficientFunction> Operator (shared_ptr<DifferentialOperator> diffop) const override;
+  NGS_DLL_HEADER shared_ptr<CoefficientFunction> Operator (const string & name) const override;
+  NGS_DLL_HEADER shared_ptr<CoefficientFunction> Operator (shared_ptr<DifferentialOperator> diffop) const override;
     
   const shared_ptr<ngcomp::FESpace> & GetFESpace() const { return fes; }
+  void SetFESpace(shared_ptr<ngcomp::FESpace> fespace) { fes = fespace; }
   
   virtual double Evaluate (const BaseMappedIntegrationPoint & ip) const override
   {
@@ -740,6 +741,23 @@ public:
                                  void * precomputed,
                                  LocalHeap & lh) const;
 
+    NGS_DLL_HEADER virtual void 
+    ApplyElementMatrixTrans (const FiniteElement & fel, 
+                             const ElementTransformation & trafo, 
+                             const FlatVector<double> elx, 
+                             FlatVector<double> ely,
+                             void * precomputed,
+                             LocalHeap & lh) const override;
+    
+    template <typename SCAL, typename SCAL_SHAPES>
+    void T_ApplyElementMatrixTransEB (const FiniteElement & fel, 
+                                      const ElementTransformation & trafo, 
+                                      const FlatVector<double> elx, 
+                                      FlatVector<double> ely,
+                                      void * precomputed,
+                                      LocalHeap & lh) const;
+
+    
     const auto & GetCoefficientFunction() { return cf; }
     const auto & TrialProxies() { return trial_proxies; } 
     const auto & TestProxies() { return test_proxies; } 
@@ -961,6 +979,18 @@ public:
 			LocalHeap & lh) const;
   };
   
+
+class PointEvaluationFunctional
+{
+public:
+  shared_ptr<CoefficientFunction> cf;
+  Vector<> point;
+public:
+  PointEvaluationFunctional (shared_ptr<CoefficientFunction> acf,
+                             Vector<> apoint)
+    : cf(acf), point(apoint) { }
+};
+
 
 }
 

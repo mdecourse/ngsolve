@@ -222,6 +222,7 @@ namespace ngcomp
     vec[multidim] = v.CreateVector();
     *vec[multidim] = v;
     multidim++;
+    flags.SetFlag ("multidim", multidim);
   }
 
 
@@ -504,7 +505,7 @@ namespace ngcomp
 	    Vec<N+1, int> key;
 	    key = -1;
 	    for (int j = 0; j < pnums.Size(); j++)
-	      key[j] = ma->GetGlobalNodeNum (Node(NT_VERTEX, pnums[j]));
+	      key[j] = ma->GetGlobalVertexNum (pnums[j]);
 	    key[N] = dnums.Size();
 	    
 	    nodekeys.Append (key);	
@@ -681,8 +682,8 @@ namespace ngcomp
   {
     static Timer t("dummy - gather"); RegionTimer r(t);
     
-    MPI_Gather (&d, 1, MyGetMPIType<T>(), 
-		NULL, 1, MyGetMPIType<T>(), 0, comm);
+    MPI_Gather (&d, 1, GetMPIType<T>(), 
+		NULL, 1, GetMPIType<T>(), 0, comm);
   }
 
   template <typename T>
@@ -691,8 +692,8 @@ namespace ngcomp
     static Timer t("dummy - gather"); RegionTimer r(t);
 
     d[0] = T(0);
-    MPI_Gather (MPI_IN_PLACE, 1, MyGetMPIType<T>(), 
-		&d[0], 1, MyGetMPIType<T>(), 0,
+    MPI_Gather (MPI_IN_PLACE, 1, GetMPIType<T>(), 
+		&d[0], 1, GetMPIType<T>(), 0,
 		comm);
   }
 #endif
@@ -738,7 +739,7 @@ namespace ngcomp
 	    Vec<N+1, int> points;
 	    points = -1;
 	    for (int j = 0; j < pnums.Size(); j++)
-	      points[j] = ma->GetGlobalNodeNum (Node(NT_VERTEX, pnums[j]));
+	      points[j] = ma->GetGlobalVertexNum (pnums[j]);
 	    points[N] = dnums.Size();
 	    
 	    nodenums.Append(points);
@@ -812,9 +813,8 @@ namespace ngcomp
 	  {
 	    int start = fes.GetDimension() * positions[index[i]][0];
 	    int end = fes.GetDimension() * positions[index[i]][1];
-	    
 	    for (int j = 0; j < end; j++)
-	      SaveBin<SCAL>(ost, data[start++]);
+              SaveBin<SCAL>(ost, data[start++]);
 	  }
 	tw.Stop();	
       }
@@ -852,7 +852,8 @@ namespace ngcomp
     this -> vec.SetSize (gf_parent->GetMultiDim());
     GridFunction::multidim = gf_parent->GetMultiDim();
 
-#ifdef PARALLEL
+#ifdef PARALLEL_OLD
+    // is now done by ParallelVector(DofRange)
     auto comm = ma->GetCommunicator();
     if (comm.Size()>1)
       {
@@ -954,7 +955,8 @@ namespace ngcomp
 	    shared_ptr<BaseVector> ovec = vec[i];
 	
 #ifdef PARALLEL
-	    if ( this->GetFESpace()->GetParallelDofs() )
+	    // if ( this->GetFESpace()->GetParallelDofs() )
+            if ( this->GetFESpace()->IsParallel() )
 	      vec[i] = make_shared<S_ParallelBaseVectorPtr<TSCAL>> (ndof, this->GetFESpace()->GetDimension()*this->cacheblocksize,
 								    this->GetFESpace()->GetParallelDofs(), CUMULATED);
 	    else

@@ -235,16 +235,17 @@ namespace ngcomp
   {
     const GridFunction * deform;
     const ScalarFiniteElement<DIMS> * fel;
-    FlatVector<> elvec;
+    // FlatVector<> elvec;
     FlatMatrix<> elvecs;
   public:
     ALE_ElementTransformation (const MeshAccess * amesh, 
                                ELEMENT_TYPE aet, ElementId ei, int elindex,
                                const GridFunction * adeform,
-                               LocalHeap & lh)
+                               Allocator & lh)
       : BASE(amesh, aet, ei, elindex), 
         deform(adeform) 
     {
+      // LocalHeap & lh = dynamic_cast<LocalHeap&> (alh);
       this->iscurved = true;
 
       auto & bfel = deform->GetFESpace()->GetFE(ei, lh);
@@ -253,32 +254,40 @@ namespace ngcomp
         {
           fel = dynamic_cast<const ScalarFiniteElement<DIMS>*> (&(*cfel)[0]);
           size_t nds = fel->GetNDof();
-          Array<int> dnums(cfel->GetNDof(), lh);
+          ArrayMem<int,100> dnums(cfel->GetNDof());
           deform->GetFESpace()->GetDofNrs(ei, dnums);
           
-          elvec.AssignMemory(dnums.Size(), lh);
+          // elvec.AssignMemory(dnums.Size(), lh);
 
-          FlatVector<> helvec(dnums.Size(), lh); // temporary
+          // FlatVector<> helvec(dnums.Size(), lh); // temporary
+          VectorMem<100> helvec(dnums.Size()); // temporary
           deform->GetElementVector(dnums, helvec);
+          /*
           for (int i = 0; i < DIMR; i++)
             for (int j = 0; j < nds; j++)
               elvec(j*DIMR+i) = helvec(i*nds+j);
-          
           elvecs.AssignMemory(DIMR, nds, lh);
           for (int j = 0; j < DIMR; j++)
             elvecs.Row(j) = elvec.Slice(j,DIMR);
+          */
+          // elvecs.AssignMemory(DIMR, nds, lh);
+          elvecs.AssignMemory(DIMR, nds, new (lh) double[DIMR*nds]);
+          for (int j = 0; j < DIMR; j++)
+            elvecs.Row(j) = helvec.Range(j*nds, (j+1)*nds);
         }
       else
         {
           fel = dynamic_cast<const ScalarFiniteElement<DIMS>*> (&bfel);
           
-          Array<int> dnums(fel->GetNDof(), lh);
+          ArrayMem<int,100> dnums(fel->GetNDof());
           deform->GetFESpace()->GetDofNrs(ei, dnums);
-          
-          elvec.AssignMemory(DIMR*dnums.Size(), lh);
+
+          // elvec.AssignMemory(DIMR*dnums.Size(), lh);
+          VectorMem<100> elvec(DIMR*dnums.Size());
           deform->GetElementVector(dnums, elvec);
           
-          elvecs.AssignMemory(DIMR, dnums.Size(), lh);
+          // elvecs.AssignMemory(DIMR, dnums.Size(), lh);
+          elvecs.AssignMemory(DIMR, dnums.Size(), new (lh) double[DIMR*dnums.Size()]);          
           for (int j = 0; j < DIMR; j++)
             elvecs.Row(j) = elvec.Slice(j,DIMR);
         }
@@ -388,8 +397,10 @@ namespace ngcomp
 
       for (int i = 0; i < DIMR; i++)
         {
-          fel->Evaluate (ir, elvec.Slice(i,DIMR), def);
-          fel->EvaluateGrad (ir, elvec.Slice(i,DIMR), grad);
+          // fel->Evaluate (ir, elvec.Slice(i,DIMR), def);
+          // fel->EvaluateGrad (ir, elvec.Slice(i,DIMR), grad);
+          fel->Evaluate (ir, elvecs.Row(i), def);
+          fel->EvaluateGrad (ir, elvecs.Row(i), grad);
           
           for (size_t k = 0; k < ir.Size(); k++)
             {
@@ -1144,6 +1155,125 @@ namespace ngcomp
     CalcIdentifiedFacets();
   }
 
+  void MeshAccess :: BuildNeighbours()
+  {
+    static Timer timer_neighbours("Build neighbours");
+    RegionTimer reg(timer_neighbours);
+
+    const auto& nmesh = *GetNetgenMesh();
+    const auto& topology = nmesh.GetTopology();
+
+    for(auto i : Range(4))
+      for(auto j : Range(4))
+        neighbours[i][j].SetSize(nregions[i]);
+
+    Array<int> edgemap(GetNEdges());
+    edgemap = -1;
+    for(auto seg : Elements(VorB(dim-1)))
+      edgemap[seg.edges[0]] = seg.GetIndex();
+
+    Array<int> vertmap(GetNV());
+    vertmap = -1;
+    for(auto pel : Elements(VorB(dim)))
+      vertmap[pel.Vertices()[0]] = pel.GetIndex();
+
+    if(GetDimension() == 3)
+      {
+        for(auto sei : Range(nmesh.SurfaceElements()))
+          {
+            int el1, el2;
+            topology.GetSurface2VolumeElement(sei+1, el1, el2);
+            const auto& sel = nmesh.SurfaceElements()[sei];
+            auto bc = nmesh.GetFaceDescriptor(sel.GetIndex()).BCProperty()-1;
+            if(el1 > 0)
+              {
+                auto index1 = nmesh.VolumeElement(el1).GetIndex()-1;
+                neighbours[BND][VOL].AddUnique(bc, index1);
+                neighbours[VOL][BND].AddUnique(index1, bc);
+              }
+            if(el2 > 0)
+              {
+                auto index2 = nmesh.VolumeElement(el2).GetIndex()-1;
+                neighbours[BND][VOL].AddUnique(bc, index2);
+                neighbours[VOL][BND].AddUnique(index2, bc);
+              }
+          }
+        for(auto ei : Elements(VOL))
+          {
+            const auto& el = GetElement(ei);
+            auto index = el.GetIndex();
+            for(const auto& edge : el.Edges())
+              {
+                if(auto eindex = edgemap[edge]; eindex != -1)
+                  {
+                    neighbours[VOL][BBND].AddUnique(index, eindex);
+                    neighbours[BBND][VOL].AddUnique(eindex, index);
+                  }
+              }
+            for(auto v : el.Vertices())
+              {
+                if(auto vindex = vertmap[v]; vindex != -1)
+                  {
+                    neighbours[BBBND][VOL].AddUnique(vindex, index);
+                    neighbours[VOL][BBBND].AddUnique(index, vindex);
+                  }
+              }
+          }
+      }
+    auto edge_vb = VorB(GetDimension()-1);
+    auto point_vb = VorB(GetDimension());
+    if(GetDimension() >= 2)
+      {
+        auto surf_vb = VorB(GetDimension()-2);
+        for(auto sei : Elements(surf_vb))
+          {
+            const auto& sel = GetElement(sei);
+            auto index = sel.GetIndex();
+            for(auto edge : sel.Edges())
+              {
+                if(auto eindex = edgemap[edge]; eindex != -1)
+                  {
+                    neighbours[surf_vb][edge_vb].AddUnique(index, eindex);
+                    neighbours[edge_vb][surf_vb].AddUnique(eindex, index);
+                  }
+              }
+            for(auto v : sel.Vertices())
+              {
+                if(auto vindex = vertmap[v]; vindex != -1)
+                  {
+                    neighbours[surf_vb][point_vb].AddUnique(index, vindex);
+                    neighbours[point_vb][surf_vb].AddUnique(vindex, index);
+                  }
+              }
+          }
+      }
+    if(GetDimension() >= 1)
+      {
+        for(auto ei : Elements(edge_vb))
+          {
+            const auto& seg = GetElement(ei);
+            auto index = seg.GetIndex();
+            for(auto v : seg.Vertices())
+              {
+                if(auto vindex = vertmap[v]; vindex != -1)
+                  {
+                    neighbours[edge_vb][point_vb].AddUnique(index, vindex);
+                    neighbours[point_vb][edge_vb].AddUnique(vindex, index);
+                  }
+              }
+          }
+      }
+
+    // same codim neighbours have common codim-1 neighbour
+    for(auto i : Range(4))
+      if(GetDimension() - i > 0)
+        for(auto j : Range(nregions[i]))
+          for(auto bnd : neighbours[i][i+1][j])
+            for(auto mat : neighbours[i+1][i][bnd])
+              if(mat != j)
+                neighbours[i][i].AddUnique(j, mat);
+  }
+
   void MeshAccess :: 
   GetElEdges (int elnr, Array<int> & ednums, Array<int> & orient) const
   {
@@ -1402,38 +1532,6 @@ namespace ngcomp
       }
   }
 
-  void MeshAccess::PushStatus (const char * str) const
-  { 
-    Ng_PushStatus (str);
-  }
-  void MeshAccess::PopStatus () const
-  { 
-    Ng_PopStatus ();
-  }
-  void MeshAccess::SetThreadPercentage (double percent) const
-  { 
-    Ng_SetThreadPercentage (percent); 
-  }
-  void MeshAccess :: GetStatus (string & str, double & percent) const
-  {
-    char * s;
-    Ng_GetStatus(&s,percent);
-    str = s;
-  }
-
-  void MeshAccess :: SetTerminate(void) const
-  {
-    Ng_SetTerminate();
-  }
-  void MeshAccess :: UnSetTerminate(void) const
-  {
-    Ng_UnSetTerminate();
-  }
-  bool MeshAccess :: ShouldTerminate(void) const
-  {
-    return (Ng_ShouldTerminate() != 0);
-  }
-  
   void MeshAccess :: GetVertexElements (size_t vnr, Array<int> & elnrs) const
   {
     elnrs = ArrayObject(mesh.GetNode<0> (vnr).elements);
@@ -1514,8 +1612,8 @@ namespace ngcomp
             ALE_ElementTransformation<DIM, DIM, Ng_ElementTransformation<DIM,DIM>>
             (this, el.GetType(), 
              ElementId(VOL,elnr), el.GetIndex(),
-             loc_deformation, 
-             dynamic_cast<LocalHeap&> (lh));
+             loc_deformation, lh); 
+        // dynamic_cast<LocalHeap&> (lh));
 
         else
 
@@ -1523,8 +1621,8 @@ namespace ngcomp
             ALE_ElementTransformation<DIM, DIM, Ng_ConstElementTransformation<DIM,DIM>>
             (this, el.GetType(), 
              ElementId(VOL,elnr), el.GetIndex(),
-             loc_deformation, 
-             dynamic_cast<LocalHeap&> (lh));
+             loc_deformation, lh);
+        //dynamic_cast<LocalHeap&> (lh));
       }
 
     else if ( el.is_curved )
@@ -1567,8 +1665,8 @@ namespace ngcomp
       eltrans = new (lh) ALE_ElementTransformation<DIM-1,DIM, Ng_ElementTransformation<DIM-1,DIM>>
         (this, el.GetType(), 
          ElementId(BND,elnr), el.GetIndex(),
-         loc_deformation, 
-         dynamic_cast<LocalHeap&> (lh)); 
+         loc_deformation, lh);
+         // dynamic_cast<LocalHeap&> (lh)); 
     
     else if ( el.is_curved )
 
@@ -1604,8 +1702,8 @@ namespace ngcomp
       eltrans = new (lh) ALE_ElementTransformation<DIM-2,DIM, Ng_ElementTransformation<DIM-2,DIM>>
 	(this,el.GetType(),
 	 ElementId(BBND,elnr), el.GetIndex(),
-	 loc_deformation,
-	 dynamic_cast<LocalHeap&>(lh));
+	 loc_deformation, lh);
+    // dynamic_cast<LocalHeap&>(lh));
     else if( el.is_curved )
       eltrans = new (lh) Ng_ElementTransformation<DIM-2,DIM> (this, el.GetType(),
 							      ElementId(BBND,elnr), el.GetIndex());
@@ -1679,8 +1777,8 @@ namespace ngcomp
             eltrans = new (lh) ALE_ElementTransformation<0,3, Ng_ElementTransformation<0,3>>
               (this,el.GetType(),
                ElementId(BBBND,elnr), el.GetIndex(),
-               loc_deformation,
-               dynamic_cast<LocalHeap&>(lh));
+               loc_deformation, lh);
+          // dynamic_cast<LocalHeap&>(lh));
           else 
             eltrans = new (lh) Ng_ConstElementTransformation<0,3> (this, el.GetType(),
                                                                    ElementId(BBBND,elnr), el.GetIndex());
@@ -1695,20 +1793,61 @@ namespace ngcomp
                     VorB avb, string pattern)
     : mesh(amesh), vb(avb)
   {
-    mask = BitArray(mesh->GetNRegions(vb));
-    mask.Clear();
+    mask = make_shared<BitArray>(mesh->GetNRegions(vb));
+    mask->Clear();
     regex re_pattern(pattern);
 
-    for (int i : Range(mask))
+    for (int i : Range(*mask))
       if (regex_match(mesh->GetMaterial(vb,i), re_pattern))
-        mask.SetBit(i);
+        mask->SetBit(i);
   }      
 
   Region :: Region (const shared_ptr<MeshAccess> & amesh, VorB avb, const BitArray & amask)
-    : mesh(amesh), vb(avb), mask(amask)
+    : mesh(amesh), vb(avb), mask(make_shared<BitArray>(amask))
   { ; }
 
-  
+  Region :: Region (const shared_ptr<MeshAccess> & amesh, VorB avb, bool all)
+    : mesh(amesh), vb(avb),
+      mask(make_shared<BitArray>(amesh->GetNRegions(avb)))
+  {
+    if(all)
+      mask->Set();
+    else
+      mask->Clear();
+  }
+
+  Region Region :: GetNeighbours(VorB other_vb)
+  {
+    if(mesh->neighbours[vb][other_vb].Size() == 0)
+      {
+        static mutex calc_neighbour_mutex;
+        lock_guard<mutex> guard(calc_neighbour_mutex);
+        if(mesh->neighbours[vb][other_vb].Size() == 0)
+          mesh->BuildNeighbours();
+      }
+    Region neighbours(mesh, other_vb);
+    for(auto i : Range(mask->Size()))
+      if(mask->Test(i))
+        for(auto j : mesh->neighbours[vb][other_vb][i])
+          neighbours.Mask().SetBit(j);
+    return neighbours;
+  }
+
+  bool Region :: operator==(const Region& other) const
+  {
+    if(mesh.get() != other.Mesh().get())
+      return false;
+    if(vb != other.VB())
+      return false;
+    return *mask == other.Mask();
+  }
+
+  size_t Region :: Hash() const
+  {
+    HashArchive ar;
+    ar & *mask;
+    return ar.GetHash();
+  }
 
   double MeshAccess :: ElementVolume (int elnr) const
   {
@@ -1826,7 +1965,7 @@ namespace ngcomp
 					const Array<int> * const indices) const
   {
     static Timer t("FindElementOfPonit");
-    RegionTimer reg(t);
+    RegionTracer reg(TaskManager::GetThreadId(), t);
 
 
     if (indices != NULL)
@@ -2109,6 +2248,61 @@ namespace ngcomp
   }
 
 
+  const Table<size_t> & MeshAccess :: GetElementsOfClass()
+  {
+    if (int(elements_of_class_timestamp) >= mesh.GetTimeStamp())
+      return elements_of_class;
+
+    Array<short> classnr(GetNE());
+    LocalHeap lh(10000);  // should use ParallelForRange, then we don't need the lh
+    IterateElements
+      (VOL, lh, [&] (auto el, LocalHeap & llh)
+       {
+         classnr[el.Nr()] = 
+           SwitchET<ET_TRIG,ET_TET>
+           (el.GetType(),
+            [el] (auto et) { return ET_trait<et.ElementType()>::GetClassNr(el.Vertices()); });
+       });
+    
+    TableCreator<size_t> creator;
+    for ( ; !creator.Done(); creator++)
+      for (auto i : Range(classnr))
+        creator.Add (classnr[i], i);
+
+    elements_of_class = creator.MoveTable();
+    elements_of_class_timestamp = mesh.GetTimeStamp();
+    return elements_of_class;
+  }
+
+  shared_ptr<CoefficientFunction> MeshAccess ::
+  RegionCF(VorB vb, shared_ptr<CoefficientFunction> default_value, const Array<pair<variant<string, Region>, shared_ptr<CoefficientFunction>>>& region_values)
+  {
+    Array<shared_ptr<CoefficientFunction>> cfs(GetNRegions(vb));
+    shared_ptr<MeshAccess> spm(this, NOOP_Deleter);
+    for(const auto& val : region_values)
+      {
+        const auto& key = val.first;
+        Region region;
+        if(auto skey = get_if<string>(&key); skey)
+          region = Region(spm, vb, *skey);
+        else
+          {
+            region = *get_if<Region>(&key);
+            if(region.VB() != vb)
+              throw Exception("Region with false vb given to region wise CF!");
+          }
+        for(auto i : Range(region.Mask().Size()))
+          {
+            if(region.Mask()[i])
+              cfs[i] = val.second;
+          }
+      }
+    for(auto i : Range(cfs))
+      if(cfs[i] == nullptr)
+        cfs[i] = default_value;
+    return MakeDomainWiseCoefficientFunction(move(cfs));
+  }
+
   class BoundaryFromVolumeCoefficientFunction :
     public T_CoefficientFunction<BoundaryFromVolumeCoefficientFunction>
   {
@@ -2222,6 +2416,12 @@ namespace ngcomp
     int glob = NgPar_GetGlobalNodeNum (node.GetType(), node.GetNr());
     return glob;
   }
+
+  size_t MeshAccess :: GetGlobalVertexNum (int locnum) const
+  {
+    // return NgPar_GetGlobalNodeNum (NT_VERTEX, locnum);
+    return mesh.GetGlobalVertexNum (locnum);
+  }
   
   void MeshAccess :: GetDistantProcs (NodeId node, Array<int> & procs) const
   {
@@ -2241,11 +2441,10 @@ namespace ngcomp
 	}
       }
       else { // node.GetType() == NT_GLOBAL
-	auto tup = mesh.GetDistantProcs(node.GetType(), node.GetNr());
-	procs.SetSize(get<0>(tup));
-	auto* ptr = get<1>(tup);
-	for(auto k : Range(procs.Size()))
-	  { procs[k] = ptr[k]; }
+	auto dps = mesh.GetDistantProcs(node.GetType(), node.GetNr());
+	procs.SetSize(dps.Size());
+	for (auto k : Range(procs.Size()))
+          procs[k] = dps[k]; 
       }
     }
     else // GetCommunicator().Size() > 1

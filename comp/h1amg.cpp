@@ -218,12 +218,23 @@ namespace ngcomp
                      }, TasksPerThread(5));
       Table<int> edge_dag = edge_dag_creator.MoveTable();
 
+      
+      BitArray isolated_verts(num_vertices);
+      isolated_verts.Clear();
+      for (size_t i = 0; i < num_vertices; i++)
+        if (sum_vertex_weights[i] <= 1.1 * vertex_weights[i] ||
+            (*freedofs)[i] == false)
+          isolated_verts.SetBit(i);
+
+      
       RunParallelDependency (edge_dag,
                              [&] (int edgenr)
                              {
                                auto v0 = e2v[edgenr][0];
                                auto v1 = e2v[edgenr][1];
-                               if (edge_collapse_weights[edgenr] >= 0.01 && !vertex_collapse[v0] && !vertex_collapse[v1] && (*freedofs)[v0] && (*freedofs)[v1])
+                               if (edge_collapse_weights[edgenr] >= 0.01 && !vertex_collapse[v0] && !vertex_collapse[v1]
+                                   && !isolated_verts[v0] && !isolated_verts[v1])
+                                 // && (*freedofs)[v0] && (*freedofs)[v1])
                                  {
                                    edge_collapse[edgenr] = true;
                                    vertex_collapse[v0] = true;
@@ -242,12 +253,6 @@ namespace ngcomp
             vertex_collapse[max2(v0,v1)] = true;
           }
 
-      BitArray isolated_verts(num_vertices);
-      isolated_verts.Clear();
-      for (size_t i = 0; i < num_vertices; i++)
-        if (sum_vertex_weights[i] == vertex_weights[i] ||
-            (*freedofs)[i] == false)
-          isolated_verts.SetBit(i);
 
       // vertex 2 coarse vertex
       Array<size_t> v2cv(num_vertices);
@@ -341,9 +346,9 @@ namespace ngcomp
                       AtomicAdd(coarse_edge_weights[e2ce[e]], edge_weights[e]);
                     int v0 = e2v[e][0], v1 = e2v[e][1];
                     bool free0 = (*freedofs)[v0], free1 = (*freedofs)[v1];
-                    if (free0 && !free1)
+                    if (free0 && !free1 && v2cv[v0] != -1)
                       AtomicAdd(coarse_vertex_weights[v2cv[v0]], edge_weights[e]);
-                    if (free1 && !free0)
+                    if (free1 && !free0 && v2cv[v1] != -1)
                       AtomicAdd(coarse_vertex_weights[v2cv[v1]], edge_weights[e]);
                   });
 
@@ -371,7 +376,7 @@ namespace ngcomp
 
       for (int i = 0; i < num_vertices; i++)
         nne[i] = (v2cv[i] != -1) ? 1 : 0;
-      prolongation = make_shared<SparseMatrix<double>> (nne, num_coarse_vertices);
+      prolongation = make_shared<SparseMatrix<double,SCAL,SCAL>> (nne, num_coarse_vertices);
       for (int i = 0; i < num_vertices; i++)
         if (v2cv[i] != -1)
           (*prolongation)(i, v2cv[i]) = 1;
@@ -382,7 +387,7 @@ namespace ngcomp
           for (auto i : Range(num_vertices))
             nne[i] = 1+v2e[i].Size();
 
-          auto smoothprol = make_shared<SparseMatrix<double>> (nne, num_vertices);
+          auto smoothprol = make_shared<SparseMatrix<double,SCAL,SCAL>> (nne, num_vertices);
           ParallelFor
             (num_vertices, [&] (auto i)
              {
@@ -409,7 +414,6 @@ namespace ngcomp
         }
 
       auto coarsemat = mat -> Restrict (*prolongation);
-
       // coarse freedofs
       auto coarse_freedofs = make_shared<BitArray> (num_coarse_vertices);
       coarse_freedofs->Clear();
@@ -419,7 +423,7 @@ namespace ngcomp
                       coarse_freedofs->SetBitAtomic(v2cv[v]);
                   });
 
-      if (num_coarse_vertices < 10)
+      if ( (num_coarse_vertices < 10) || (num_coarse_vertices == num_vertices) )
 	{
 	  coarsemat->SetInverseType(SPARSECHOLESKY);
 	  coarse_precond = coarsemat->InverseMatrix(coarse_freedofs);
@@ -428,8 +432,8 @@ namespace ngcomp
         coarse_precond = make_shared<H1AMG_Matrix> (dynamic_pointer_cast<SparseMatrixTM<SCAL>> (coarsemat), coarse_freedofs,
                                                     coarse_e2v, coarse_edge_weights, coarse_vertex_weights, level+1);
 
-
-      restriction = TransposeMatrix (*prolongation);
+      // restriction = TransposeMatrix (*prolongation);
+      restriction = dynamic_pointer_cast<SparseMatrixTM<double>>(prolongation->CreateTranspose());
     }
 
   template <typename SCAL>
@@ -437,11 +441,10 @@ namespace ngcomp
   {
       static Timer t("H1AMG::Mult"); RegionTimer reg(t);
       x = 0;
-
       smoother->GSSmooth(x, b, smoothing_steps);
       auto residuum = b.CreateVector();
       residuum = b - (*mat) * x;
-
+      
       auto coarse_residuum = coarse_precond->CreateColVector();
       coarse_residuum = *restriction * residuum;
 
@@ -463,11 +466,27 @@ namespace ngcomp
 
   public:
 
+    static shared_ptr<Preconditioner> Create (const PDE & pde, const Flags & flags, const string & name)
+    {
+      return make_shared<H1AMG_Preconditioner<double>> (pde, flags, name);      
+    }
+    
+    static shared_ptr<Preconditioner> CreateBF (shared_ptr<BilinearForm> bfa, const Flags & flags, const string & name)
+    {
+      if (bfa->GetFESpace()->IsComplex())
+        return make_shared<H1AMG_Preconditioner<Complex>> (bfa, flags, name);
+      else
+        return make_shared<H1AMG_Preconditioner<double>> (bfa, flags, name);
+    }
+
     H1AMG_Preconditioner (shared_ptr<BilinearForm> abfa, const Flags & aflags,
                           const string aname = "H1AMG_cprecond")
       : Preconditioner (abfa, aflags, aname)
     {
-      cout << IM(5) << "Create H1AMG" << endl;
+      if (is_same<SCAL,double>::value)
+        cout << IM(3) << "Create H1AMG" << endl;
+      else
+        cout << IM(3) << "Create H1AMG, complex" << endl;
     }
 
     H1AMG_Preconditioner (const PDE & pde, const Flags & aflags, const string & aname)
@@ -504,11 +523,11 @@ namespace ngcomp
       vertex_weights_ht.IterateParallel
         ([&vertex_weights] (size_t i, INT<1> key, double weight)
          {
-           vertex_weights[i] = weight;
+           vertex_weights[key[0]] = weight;
          });
       vertex_weights_ht = ParallelHashTable<INT<1>,double>();
 
-      mat = make_shared<H1AMG_Matrix<double>> (smat, freedofs, e2v, edge_weights, vertex_weights, 0);
+      mat = make_shared<H1AMG_Matrix<SCAL>> (smat, freedofs, e2v, edge_weights, vertex_weights, 0);
     }
 
 
@@ -518,43 +537,42 @@ namespace ngcomp
                                    LocalHeap & lh) override
     {
       // vertex weights
-      static Timer t("h1amg - addelmat");
-      static Timer t1("h1amg - addelmat calc v-schur");
-      static Timer t3("h1amg - addelmat calc e-schur");
-      static Timer t5("h1amg - addelmat invert");
+      // static Timer t("h1amg - addelmat");
+      // static Timer t1("h1amg - addelmat calc v-schur");
+      // static Timer t3("h1amg - addelmat calc e-schur");
+      // static Timer t5("h1amg - addelmat invert");
 
-      ThreadRegionTimer reg (t, TaskManager::GetThreadId());
+      // ThreadRegionTimer reg (t, TaskManager::GetThreadId());
 
       size_t ndof = dnums.Size();
       BitArray used(ndof, lh);
 
       FlatMatrix<SCAL> ext_elmat(ndof+1, ndof+1, lh);
 
-
       {
-      ThreadRegionTimer reg (t5, TaskManager::GetThreadId());
-      ext_elmat.Rows(0,ndof).Cols(0,ndof) = elmat;
-      ext_elmat.Row(ndof) = 1;
-      ext_elmat.Col(ndof) = 1;
-      ext_elmat(ndof, ndof) = 0;
-      CalcInverse (ext_elmat);
+        // ThreadRegionTimer reg (t5, TaskManager::GetThreadId());
+        ext_elmat.Rows(0,ndof).Cols(0,ndof) = elmat;
+        ext_elmat.Row(ndof) = 1;
+        ext_elmat.Col(ndof) = 1;
+        ext_elmat(ndof, ndof) = 0;
+        CalcInverse (ext_elmat);
       }
 
       {
-      ThreadRegionTimer reg (t1, TaskManager::GetThreadId());
-      for (size_t i = 0; i < dnums.Size(); i++)
-        {
-          Mat<2,2,SCAL> ai;
-          ai(0,0) = ext_elmat(i,i);
-          ai(0,1) = ai(1,0) = ext_elmat(i, ndof);
-          ai(1,1) = ext_elmat(ndof, ndof);
-          ai = Inv(ai);
-          double weight = fabs(ai(0,0));
-          vertex_weights_ht.Do(INT<1>(dnums[i]), [weight] (auto & v) { v += weight; });
-        }
+        // ThreadRegionTimer reg (t1, TaskManager::GetThreadId());
+        for (size_t i = 0; i < dnums.Size(); i++)
+          {
+            Mat<2,2,SCAL> ai;
+            ai(0,0) = ext_elmat(i,i);
+            ai(0,1) = ai(1,0) = ext_elmat(i, ndof);
+            ai(1,1) = ext_elmat(ndof, ndof);
+            ai = Inv(ai);
+            double weight = fabs(ai(0,0));
+            vertex_weights_ht.Do(INT<1>(dnums[i]), [weight] (auto & v) { v += weight; });
+          }
       }
       {
-      ThreadRegionTimer reg (t3, TaskManager::GetThreadId());
+        // ThreadRegionTimer reg (t3, TaskManager::GetThreadId());
       for (size_t i = 0; i < dnums.Size(); i++)
         for (size_t j = 0; j < i; j++)
           {
@@ -570,7 +588,6 @@ namespace ngcomp
             edge_weights_ht.Do(INT<2>(dnums[j], dnums[i]).Sort(), [weight] (auto & v) { v += weight; });
           }
       }
-
 
 
       /*
@@ -610,5 +627,12 @@ namespace ngcomp
   };
 
   template class H1AMG_Matrix<double>;
-  static RegisterPreconditioner<H1AMG_Preconditioner<double> > initpre ("h1amg");
+  template class H1AMG_Matrix<Complex>;
+  // static RegisterPreconditioner<H1AMG_Preconditioner<double> > initpre ("h1amg");
+  auto initpre = [] () {
+    GetPreconditionerClasses().AddPreconditioner("h1amg",
+                                                 H1AMG_Preconditioner<double>::Create,
+                                                 H1AMG_Preconditioner<double>::CreateBF);
+    return 1;
+  } ();
 }

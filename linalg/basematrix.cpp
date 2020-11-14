@@ -9,6 +9,7 @@
 */
 
 #include <la.hpp>
+#include <../parallel/parallel_matrices.hpp>
 
 namespace ngla
 {
@@ -93,13 +94,15 @@ namespace ngla
   
   void BaseMatrix :: Mult (const BaseVector & x, BaseVector & y) const
   {
-    y = 0;
+    // y = 0;
+    y.SetZero();
     MultAdd (1, x, y);
   }
 
   void BaseMatrix :: MultTrans (const BaseVector & x, BaseVector & y) const
   {
-    y = 0;
+    // y = 0;
+    y.SetZero();
     MultTransAdd (1, x, y);
   }
 
@@ -171,6 +174,14 @@ namespace ngla
     y.FV<Complex>() = Conj(tmpy.FV<Complex>());
     // throw Exception(string("MultHermitianAdd not overloaded for type ")+typeid(*this).name());
   }
+
+  void BaseMatrix :: MultAdd (FlatVector<double> alpha, const MultiVector & x, MultiVector & y) const
+  {
+    for (int i = 0; i < alpha.Size(); i++)
+      MultAdd (alpha[i], *x[i], *y[i]);
+  }
+
+
   
    // to split mat x vec for symmetric matrices
   void BaseMatrix :: MultAdd1 (double s, const BaseVector & x, BaseVector & y,
@@ -301,5 +312,177 @@ namespace ngla
       }
     return "";
   }
+
+
+  BaseMatrix::OperatorInfo BaseMatrix :: GetOperatorInfo () const
+  {
+    OperatorInfo info;
+    info.name = typeid(*this).name();
+    info.height = Height();
+    info.width = Width();
+    return info;
+  }
+
+  BaseMatrix::OperatorInfo IdentityMatrix :: GetOperatorInfo () const
+  {
+    OperatorInfo info;
+    if (has_format)
+      {
+        info.name = "Identity";
+        info.height = Height();
+        info.width = Width();
+      }
+    else
+      {
+        info.name = "Identity (any format)";
+        info.height = 0;
+        info.width = 0;
+      }
+    return info;
+  }
+
+  BaseMatrix::OperatorInfo Transpose :: GetOperatorInfo () const
+  {
+    OperatorInfo info;
+    info.name = "Transpose";
+    try
+      {
+        info.height = Height();
+        info.width = Width();
+      }
+    catch (Exception &)
+      {
+        cerr << "Transpose::GetOperatorInfo, got exception for H/W" << endl;        
+      };
+    info.childs += &bm;
+    return info;
+  }
+
+  
+  BaseMatrix::OperatorInfo SumMatrix :: GetOperatorInfo () const
+  {
+    OperatorInfo info;
+    info.name = "SumMatrix";
+    try
+      {
+        info.height = Height();
+        info.width = Width();
+      }
+    catch (Exception &)
+      {
+        cerr << "SumMatrix::GetOperatorInfo, got exception for H/W" << endl;        
+      };
+    info.childs += &bma;
+    info.childs += &bmb;
+    return info;
+  }
+
+  
+  
+  BaseMatrix::OperatorInfo ProductMatrix :: GetOperatorInfo () const
+  {
+    OperatorInfo info;
+    info.name = "ProductMatrix";
+    try
+      {
+        info.height = Height();
+        info.width = Width();
+      }
+    catch (Exception &)
+      {
+        cerr << "ProductMatrix::GetOperatorInfo, got exception for H/W" << endl;
+      }
+    info.childs += &bma;
+    info.childs += &bmb;
+    return info;
+  }
+
+
+  
+  void BaseMatrix :: PrintOperatorInfo (ostream & ost, int level) const
+  {
+    auto info = GetOperatorInfo();
+    
+    ost << string(2*level, ' ');
+    ost << info.name << ", h = " << info.height << ", w = " << info.width;
+    if (IsComplex()) ost << " complex";
+    ost << endl;
+    for (auto c : info.childs)
+      {
+        try
+          {
+            c->PrintOperatorInfo (ost, level+1);
+          }
+        catch (Exception & e)
+          {
+            ost << "got exception, child type is " << typeid(*c).name() << endl;
+          } 
+      }
+  }
+
+
+
+
+
+  shared_ptr<BaseMatrix> ComposeOperators (shared_ptr<BaseMatrix> a,
+                                           shared_ptr<BaseMatrix> b)
+  {
+    if (auto embb = dynamic_pointer_cast<EmbeddingTranspose> (b))
+      {
+        // cout << "embeddingT optimization" << endl;
+        return make_shared<EmbeddedTransposeMatrix> (embb->Width(), embb->GetRange(), a);
+      }
+    
+    if (auto emba = dynamic_pointer_cast<Embedding> (a))
+      {
+        // cout << "embedding optimization" << endl;        
+        return make_shared<EmbeddedMatrix> (emba->Height(), emba->GetRange(), b);
+      }
+
+    auto para = dynamic_pointer_cast<ParallelMatrix> (a);
+    auto parb = dynamic_pointer_cast<ParallelMatrix> (b);
+
+    if (para && parb)
+      {
+        if (RowType(para->GetOpType()) == ColType(parb->GetOpType()))
+          {
+            // cout << "combining parallel matrices" << endl;
+            auto localprod = ComposeOperators (para->GetMatrix(), parb->GetMatrix());
+            return make_shared<ParallelMatrix> (localprod,
+                                                parb->GetRowParallelDofs(),
+                                                para->GetColParallelDofs(),
+                                                ParallelOp(RowType(parb->GetOpType()), ColType(para->GetOpType())));
+          }
+        else
+          {
+            cerr << "illegal operator composition" << endl;
+          }
+      }
+
+    
+    return make_shared<ProductMatrix> (a, b);
+  }
+
+
+  shared_ptr<BaseMatrix> TransposeOperator (shared_ptr<BaseMatrix> mat)
+  {
+    if (auto emb = dynamic_pointer_cast<Embedding> (mat))
+      return make_shared<EmbeddingTranspose> (emb->Height(), emb->GetRange());
+
+    if (auto emb = dynamic_pointer_cast<EmbeddingTranspose> (mat))
+      return make_shared<Embedding> (emb->Width(), emb->GetRange());
+
+    if (auto parmat = dynamic_pointer_cast<ParallelMatrix> (mat))
+      return make_shared<ParallelMatrix> (TransposeOperator(parmat->GetMatrix()),
+                                          parmat->GetColParallelDofs(),
+                                          parmat->GetRowParallelDofs(),
+                                          ParallelOp(InvertType(ColType(parmat->GetOpType())),
+                                                     InvertType(RowType(parmat->GetOpType()))));
+
+    
+    return make_shared<Transpose> (mat);
+  }
+  
+    
 
 }

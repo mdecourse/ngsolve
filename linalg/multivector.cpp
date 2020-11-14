@@ -58,13 +58,117 @@ namespace ngla {
   // }
 
 
-  MultiVector MultiVector :: Range(IntRange r) const
+
+
+
+
+
+
+  MultiVector & MultiVector::operator= (const MultiVector & v2)
   {
-    MultiVector mv2(refvec, 0);
+    if (Size() != v2.Size())
+      throw Exception("MultiVector assignment sizes mismatch, my size = "
+                      + ToString(Size()) + " other size = " + ToString(v2.Size()));
+    
+    for (auto i : ngstd::Range(vecs))
+      *vecs[i] = *v2.vecs[i];
+    return *this;
+  }
+  
+  MultiVector & MultiVector::operator= (const MultiVectorExpr & expr)
+  {
+    if (Size() != expr.Size())
+      throw Exception("MultiVector assignment sizes mismatch, my size = "
+                      + ToString(Size()) + " other size = " + ToString(expr.Size()));
+    
+    Vector<double> ones(Size());
+    ones = 1;
+    expr.AssignTo(ones, *this);
+    return *this;
+  }
+  
+  MultiVector MultiVector::operator+= (const MultiVectorExpr & expr)
+  {
+    if (Size() != expr.Size())
+      throw Exception("MultiVector assignment-add sizes mismatch, my size = "
+                      + ToString(Size()) + " other size = " + ToString(expr.Size()));
+    
+    Vector<double> ones(Size());
+    ones = 1;      
+    expr.AddTo(ones, *this);
+    return *this;
+  }
+  
+  MultiVector & MultiVector::operator-= (const MultiVectorExpr & expr)
+  {
+    if (Size() != expr.Size())
+      throw Exception("MultiVector assignment-sub sizes mismatch, my size = "
+                      + ToString(Size()) + " other size = " + ToString(expr.Size()));
+
+    Vector<double> mones(Size());
+    mones = -1;
+    expr.AddTo(mones, *this);
+    return *this;
+  }
+  
+
+
+
+
+  
+  unique_ptr<MultiVector> MultiVector :: Range(IntRange r) const
+  {
+    auto mv2 = make_unique<MultiVector>(refvec, 0);
     for (auto i : r)
-      mv2.vecs.Append (vecs[i]);
+      mv2->vecs.Append (vecs[i]);
     return mv2;
   }
+
+  unique_ptr<MultiVector> MultiVector :: SubSet(const Array<int> & indices) const
+  {
+    auto mv2 = make_unique<MultiVector>(refvec, 0);
+    for (auto i : indices)
+      mv2->vecs.Append (vecs[i]);
+    return mv2;
+  }
+
+  
+
+  void MultiVector :: AssignTo (FlatVector<double> s, class MultiVector & v) const
+  {
+    for (int i = 0; i < s.Size(); i++)
+      *v[i] = s[i] * *vecs[i];
+  }
+  
+  void MultiVector :: AddTo (FlatVector<double> s, class MultiVector & v) const 
+  {
+    for (int i = 0; i < s.Size(); i++)
+      *v[i] += s[i] * *vecs[i];
+  }
+  
+  void MultiVector ::AssignTo (FlatVector<Complex> s, class MultiVector & v) const
+  {
+    for (int i = 0; i < s.Size(); i++)
+      *v[i] = s[i] * *vecs[i];
+  }
+        
+  void MultiVector ::AddTo (FlatVector<Complex> s, class MultiVector & v) const
+  {
+    for (int i = 0; i < s.Size(); i++)
+      *v[i] += s[i] * *vecs[i];
+  }
+
+  shared_ptr<BaseVector> MultiVector ::CreateVector() const
+  {
+    return refvec->CreateVector();
+  }
+    
+  void MultiVector ::CalcComponent(size_t nr, BaseVector & bv) const
+  {
+    bv = *vecs[nr];
+  }
+
+
 
   
 
@@ -78,58 +182,166 @@ namespace ngla {
   template void Axpy (const Vector<double> & a, const MultiVector  & x, BaseVector & y);
   template void Axpy (const Vector<Complex> & a, const MultiVector  & x, BaseVector & y);
 
-
   template <class T>
-  void MultAdd (const class BaseMatrix & mat, T s, const MultiVector & x, MultiVector & y)
+  void MultAdd (const class BaseMatrix & mat, FlatVector<T> s, const MultiVector & x, MultiVector & y)
   {
-    // TODO:  exception
-    for (auto i : Range(x.Size()))
-      mat.MultAdd (s, *x[i], *y[i]);
+    if constexpr (std::is_same<T,double>::value)
+      {
+        mat.MultAdd (s, x, y);
+      }
+    else
+      for (auto i : Range(x.Size()))
+        mat.MultAdd (s(i), *x[i], *y[i]);
+  }
+  
+  template void MultAdd (const BaseMatrix & mat, FlatVector<double> s, const MultiVector & x, MultiVector & y);
+  template void MultAdd (const BaseMatrix & mat, FlatVector<Complex> s, const MultiVector & x, MultiVector & y);
+
+
+  shared_ptr<BaseVector> MatMultiVecExpr :: CreateVector() const 
+  { return mat->CreateColVector(); }
+    
+  void MatMultiVecExpr :: CalcComponent(size_t nr, BaseVector & bv) const 
+  {
+    bv = *mat * *(*vec)[nr];
+  }
+  
+
+
+  template <typename T = double>
+  inline Matrix<T> InnerProduct (const MultiVector & v1, const MultiVector & v2, bool conjugate = false)
+  {
+    if constexpr (is_same<T,double>::value)
+                   return v1.InnerProductD(v2);
+    else
+      return v1.InnerProductC(v2, conjugate);
   }
 
-  template void MultAdd (const BaseMatrix & mat, double s, const MultiVector & x, MultiVector & y);
-  template void MultAdd (const BaseMatrix & mat, Complex s, const MultiVector & x, MultiVector & y);
 
-
+  
   template <class T>
-  void T_Orthogonalize (MultiVector & mv, BaseMatrix * ipmat)
+  Matrix<T> MultiVector::T_Orthogonalize (BaseMatrix * ipmat)
   {
+    static Timer t("MultiVector::Orthogonalize");
+    RegionTimer reg(t);
+
+    auto & mv = *this;
+    Matrix<T> Rfactor(mv.Size());
+    Rfactor = T(0.0);
     if (ipmat)
       {
         auto tmp = mv.RefVec()->CreateVector();
-        
         for (int i = 0; i < mv.Size(); i++)
           {
             *tmp = *ipmat * *mv[i];
-            T norm = sqrt(InnerProduct(*tmp, *mv[i]));
+            double norm = sqrt(fabs(InnerProduct<T>(*tmp, *mv[i], true)));
+            Rfactor(i,i) = norm;
             *mv[i] *= 1.0 / norm;
             for (int j = i+1; j < mv.Size(); j++)
-              *mv[j] -= InnerProduct(*tmp, *mv[j], true)/norm * *mv[i];
+              {
+                T rij = InnerProduct<T>(*mv[j], *tmp, true) / norm;
+                Rfactor(i,j) = rij;
+                *mv[j] -= rij * *mv[i];
+              }
           }
       }
     else
       {
-        for (int i = 0; i < mv.Size(); i++)
+        if (mv.Size() == 1)
           {
-            *mv[i] *= 1.0 / (*mv[i]).L2Norm();
-            for (int j = i+1; j < mv.Size(); j++)
-              *mv[j] -= InnerProduct(*mv[i], *mv[j], true) * *mv[i];
+            double norm = (*mv[0]).L2Norm();
+            Rfactor(0,0) = norm;
+            *mv[0] *= 1.0 / norm;
+          }
+        else
+          {
+            int half = mv.Size()/2;
+            auto r1 = IntRange(0,half);
+            auto r2 = IntRange(half, mv.Size());
+            auto mv1 = mv.Range(r1);
+            auto mv2 = mv.Range(r2);
+            Rfactor.Rows(r1).Cols(r1) = mv1->T_Orthogonalize<T>(ipmat);
+            Matrix<T> ip = Conj(InnerProduct<T> (*mv1, *mv2, true));
+            Rfactor.Rows(r1).Cols(r2) = ip;
+            ip *= -1;
+            mv2->Add (*mv1, ip);
+            Rfactor.Rows(r2).Cols(r2) = mv2->T_Orthogonalize<T>(ipmat);
           }
       }
+    return Rfactor;
   }
   
   void MultiVector :: Orthogonalize (BaseMatrix * ipmat)
   {
     if (IsComplex())
-      T_Orthogonalize<Complex> (*this, ipmat);
+      this->T_Orthogonalize<Complex> (ipmat);
     else
-      T_Orthogonalize<double> (*this, ipmat);
+      this->T_Orthogonalize<double> (ipmat);
   }
 
+
+
+  void MultiVector :: AppendOrthogonalize (shared_ptr<BaseVector> v, BaseMatrix * ipmat)
+  {
+    vecs.Append (v->CreateVector());
+    *vecs.Last() = *v;
+
+    if (IsComplex())    
+      this->T_Orthogonalize<Complex> (ipmat);
+    else
+      this->T_Orthogonalize<double> (ipmat);
+  }
+
+  void MultiVector :: SetScalar (double s)
+  {
+    for (auto & vec : vecs) 
+      *vec = s;
+  }
+  
+  void MultiVector :: SetScalar (Complex s)
+  {
+    for (auto & vec : vecs) 
+      *vec = s;
+  }
+
+
+  
+  void MultiVector :: AddTo (FlatVector<double> vec, BaseVector & v2)
+  {
+    for (int i = 0; i < vec.Size(); i++)
+      v2 += vec(i) * *vecs[i];
+  }
+  
+  void MultiVector :: AddTo (FlatVector<Complex> vec, BaseVector & v2)
+  {
+    for (int i = 0; i < vec.Size(); i++)
+      v2 += vec(i) * *vecs[i];
+  }
+
+  // me[i] += v2[j] mat(j,i)
+  void MultiVector :: Add (const MultiVector & v2, FlatMatrix<double> mat)
+  {
+    for (int i = 0; i < mat.Width(); i++)
+      for (int j = 0; j < mat.Height(); j++)
+        *vecs[i] += mat(j,i) * *v2.vecs[j];
+  }
+    
+  void MultiVector :: Add (const MultiVector & v2, FlatMatrix<Complex> mat)
+  {
+    for (int i = 0; i < mat.Width(); i++)
+      for (int j = 0; j < mat.Height(); j++)
+        *vecs[i] += mat(j,i) * *v2.vecs[j];
+  }
+
+
+  
   
   Matrix<> MultiVector ::
   InnerProductD (const MultiVector & y) const
   {
+    static Timer t("MultiVector::InnerProductD");
+    RegionTimer reg(t);
+
     Matrix<double> res(Size(), y.Size());
     for (int i = 0; i < Size(); i++)
       for (int j = 0; j < y.Size(); j++)
@@ -140,6 +352,9 @@ namespace ngla {
   Matrix<Complex> MultiVector ::
   InnerProductC (const MultiVector & y, bool conjugate) const
   {
+    static Timer t("MultiVector::InnerProductC");
+    RegionTimer reg(t);
+
     Matrix<Complex> res(Size(), y.Size());
     for (int i = 0; i < Size(); i++)
       for (int j = 0; j < y.Size(); j++)
@@ -147,6 +362,48 @@ namespace ngla {
     return res;
   }
 
+
+  Matrix<> MultiVector ::
+  InnerProductD (const MultiVectorExpr & y) const
+  {
+    static Timer t("MultiVector::InnerProductD");
+    RegionTimer reg(t);
+
+    /*
+    Matrix<double> res(Size(), y.Size());
+    shared_ptr<BaseVector> hy = y.CreateVector();
+    for (int j = 0; j < y.Size(); j++)
+      {
+        y.CalcComponent(j, *hy);
+        res.Col(j) = InnerProductD(*hy);
+      }
+    return res;
+    */
+    auto mv = y.CreateVector()->CreateMultiVector(y.Size());
+    Vector<double> ones(y.Size());
+    ones = 1;
+    y.AssignTo (ones, *mv);
+    return InnerProductD (*mv);
+  }
+  
+  Matrix<Complex> MultiVector ::
+  InnerProductC (const MultiVectorExpr & y, bool conjugate) const
+  {
+    static Timer t("MultiVector::InnerProductC");
+    RegionTimer reg(t);
+
+    Matrix<Complex> res(Size(), y.Size());
+    shared_ptr<BaseVector> hy = y.CreateVector();    
+    for (int j = 0; j < y.Size(); j++)
+      {
+        y.CalcComponent(j, *hy);
+        res.Col(j) = InnerProductC(*hy, conjugate);
+      }
+    return res;
+  }
+
+
+  
 
 
 

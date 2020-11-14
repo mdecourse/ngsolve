@@ -552,6 +552,15 @@ namespace ngbla
       Swap (this->data, m2.data);
       return *this;
     }
+
+    template<typename M2>
+    Matrix & operator+= (const M2 & m) 
+    { 
+      CMCPMatExpr<FlatMatrix<T,ORD> >::operator+= (m);
+      return *this;
+    }
+
+    
   };
 
 
@@ -1885,7 +1894,7 @@ namespace ngbla
       return Rows (range.First(), range.Next());
     }
 
-    INLINE const BareSliceMatrix<T> Cols (IntRange range) const
+    INLINE const BareSliceMatrix Cols (IntRange range) const
     {
       return Cols (range.First(), range.Next());
     }

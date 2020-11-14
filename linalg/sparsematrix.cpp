@@ -55,7 +55,7 @@ namespace ngla
     firsti[size] = nze;
     
     // colnr.SetSize (nze+1);
-    colnr = NumaDistributedArray<int> (nze+1);
+    colnr = NumaDistributedArray<int> (nze);   // nze+1
 
     /*
     for (size_t i = 0; i < nze; i++)
@@ -68,8 +68,6 @@ namespace ngla
 		      {
 			hcolnr.Range(myrange) = -1;
 		      });
-
-    colnr[nze] = 0;
 
     CalcBalancing ();
   }
@@ -764,7 +762,7 @@ namespace ngla
                        }
                      else
                        {
-                         auto ptr = &colnr[firsti[i]];
+                         auto ptr = colnr.Data()+firsti[i];
                          MergeArrays(ptrs, sizes, [&ptr] (int col) 
                                      {
                                        *ptr = col;
@@ -879,7 +877,7 @@ namespace ngla
             firsti[size] = nze;
             timer_prefix.Stop();
             
-            colnr = NumaDistributedArray<int> (nze+1);
+            colnr = NumaDistributedArray<int> (nze);  // nze+1
 
 	    CalcBalancing ();
 
@@ -1287,9 +1285,12 @@ namespace ngla
 {
 
 
+  // #ifdef OLD  leave it for a while
   shared_ptr<SparseMatrixTM<double>>
   TransposeMatrix (const SparseMatrixTM<double> & mat)
   {
+    return dynamic_pointer_cast<SparseMatrixTM<double>> (mat.CreateTranspose());
+    /*
     static Timer t1("TransposeMatrix 1");
     static Timer t2("TransposeMatrix 2");
     t1.Start();
@@ -1302,7 +1303,14 @@ namespace ngla
                  });
     t1.Stop();
     t2.Start();
-    auto trans = make_shared<SparseMatrix<double>>(cnt, mat.Height());
+
+    shared_ptr<SparseMatrixTM<double>> trans;
+    if (dynamic_cast<const SparseMatrix<double,double,double>*>(&mat))
+      trans = make_shared<SparseMatrix<double>>(cnt, mat.Height());
+    else if (dynamic_cast<const SparseMatrix<double,Complex,Complex>*>(&mat))
+      trans = make_shared<SparseMatrix<double,Complex,Complex>>(cnt, mat.Height());
+    else
+      throw Exception(string("SparseMatrix-Transpose, not available for type")+typeid(mat).name()); 
 
     cnt = 0;
     ParallelFor (mat.Height(), [&] (int i)
@@ -1325,8 +1333,10 @@ namespace ngla
 
     t2.Stop();
     return trans;
+    */
   }
-
+  // #endif
+  
   shared_ptr<SparseMatrix<double,double>>
   MakeFullMatrix (const SparseMatrix<double, double> & mat)
   {
@@ -1429,7 +1439,24 @@ namespace ngla
     t1a.Stop();
     t1b.Start();
     t1b1.Start();
-    auto prod = make_shared<SparseMatrix<TM_Res>>(cnt, matb.Width());
+    // auto prod = make_shared<SparseMatrix<TM_Res>>(cnt, matb.Width());
+    shared_ptr<SparseMatrixTM<TM_Res>> prod;
+    
+    if constexpr (is_same<TM_Res,double>()) {
+        if (dynamic_cast<const SparseMatrix<double,double,double>*>(&mata) &&
+            dynamic_cast<const SparseMatrix<double,double,double>*>(&matb))
+          prod = make_shared<SparseMatrix<TM_Res,double,double>>(cnt, matb.Width());
+        else if (dynamic_cast<const SparseMatrix<double,Complex,Complex>*>(&mata) ||
+                 dynamic_cast<const SparseMatrix<double,Complex,Complex>*>(&matb))
+          prod = make_shared<SparseMatrix<TM_Res,Complex,Complex>>(cnt, matb.Width());
+        else
+          prod = make_shared<SparseMatrix<TM_Res>>(cnt, matb.Width());  // as it was, no complex supported
+      }
+    else
+      prod = make_shared<SparseMatrix<TM_Res>>(cnt, matb.Width());  // as it was, no complex supported      
+                      
+        
+        
     prod->AsVector() = 0.0;
     t1b1.Stop();
     // fill col-indices
@@ -1525,8 +1552,8 @@ namespace ngla
     return prod;
   }
 
-  shared_ptr<SparseMatrixTM<double>> MatMult (const SparseMatrix<double, double, double> & mata,
-                const SparseMatrix<double, double, double> & matb)
+  shared_ptr<SparseMatrixTM<double>> MatMult (const SparseMatrixTM<double> & mata,
+                                              const SparseMatrixTM<double> & matb)
   {
     return MatMult<double, double, double>(mata, matb);
   }
@@ -1675,7 +1702,8 @@ namespace ngla
     static Timer t ("sparsematrix - restrict");
     RegionTimer reg(t);
 
-    auto prolT = TransposeMatrix(prol);
+    // auto prolT = TransposeMatrix(prol);
+    auto prolT = dynamic_pointer_cast<SparseMatrixTM<double>> (prol.CreateTranspose());
 
     auto prod1 = MatMult<double, double, double>(*this, prol);
     auto prod = MatMult<double, double, double>(*prolT, *prod1);
@@ -1689,8 +1717,9 @@ namespace ngla
     static Timer t ("sparsematrix - restrict");
     RegionTimer reg(t);
     // new version
-    auto prolT = TransposeMatrix(prol);
-
+    // auto prolT = TransposeMatrix(prol);
+    auto prolT = dynamic_pointer_cast<SparseMatrixTM<double>> (prol.CreateTranspose());
+    
     auto prod1 = MatMult<std::complex<double>, std::complex<double>, double>(*this, prol);
     auto prod = MatMult<std::complex<double>, double, std::complex<double>>(*prolT, *prod1);
     return prod;
@@ -1707,7 +1736,8 @@ namespace ngla
     static Timer t ("sparsematrixsymmetric - restrict");
     RegionTimer reg(t);
     // new version
-    auto prolT = TransposeMatrix(prol);
+    // auto prolT = TransposeMatrix(prol);
+    auto prolT = dynamic_pointer_cast<SparseMatrixTM<double>> (prol.CreateTranspose());    
     auto full = MakeFullMatrix(*this);
 
     auto prod1 = MatMult<double, double, double>(*full, prol);
@@ -1957,6 +1987,78 @@ namespace ngla
   }
 
 
+  template <>
+  void SparseMatrix<double,double,double> ::
+  MultAdd (FlatVector<double> alpha, const MultiVector & x, MultiVector & y) const
+  {
+    // BaseMatrix::MultAdd (alpha, x, y);
+
+    static Timer t("SparseMatrix::MultAdd Multivec"); RegionTimer reg(t);
+    t.AddFlops (this->NZE()*x.Size());
+
+
+    task_manager -> CreateJob
+      ([&] (TaskInfo & ti)
+       {
+         int tasks_per_part = ti.ntasks / balance.Size();
+         int mypart = ti.task_nr / tasks_per_part;
+         int num_in_part = ti.task_nr % tasks_per_part;
+
+         auto myrange = balance[mypart].Split (num_in_part, tasks_per_part);
+
+         int i = 0;
+         for ( ; i + 4 <= x.Size(); i += 4)
+           {
+             auto fx0 = x[i+0]->FVDouble();
+             auto fx1 = x[i+1]->FVDouble();
+             auto fx2 = x[i+2]->FVDouble();
+             auto fx3 = x[i+3]->FVDouble();
+             auto fy0 = y[i+0]->FVDouble();
+             auto fy1 = y[i+1]->FVDouble();
+             auto fy2 = y[i+2]->FVDouble();
+             auto fy3 = y[i+3]->FVDouble();
+             double a0 = alpha[i+0];
+             double a1 = alpha[i+1];
+             double a2 = alpha[i+2];
+             double a3 = alpha[i+3];
+             for (auto row : myrange)
+               {
+                 double sum0 = 0;
+                 double sum1 = 0;
+                 double sum2 = 0;
+                 double sum3 = 0;
+                 for (size_t j = firsti[row]; j < firsti[row+1]; j++)
+                   {
+                     sum0 += data[j] * fx0(colnr[j]);
+                     sum1 += data[j] * fx1(colnr[j]);
+                     sum2 += data[j] * fx2(colnr[j]);
+                     sum3 += data[j] * fx3(colnr[j]);
+                   }
+                 fy0(row) += a0 * sum0;
+                 fy1(row) += a1 * sum1;
+                 fy2(row) += a2 * sum2;
+                 fy3(row) += a3 * sum3;
+               }
+           }
+
+         for ( ; i+1 <= x.Size(); i++)
+           {
+             auto fx0 = x[i+0]->FVDouble();
+             auto fy0 = y[i+0]->FVDouble();
+             double a0 = alpha[i+0];
+             for (auto row : myrange)
+               {
+                 double sum0 = 0;
+                 for (size_t j = firsti[row]; j < firsti[row+1]; j++)
+                   {
+                     sum0 += data[j] * fx0(colnr[j]);
+                   }
+                 fy0(row) += a0 * sum0;
+               }
+           }
+
+       });
+  }
 
 
   //  template class SparseMatrix<double>;

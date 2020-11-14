@@ -12,12 +12,12 @@ namespace ngfem
     T result = 0.;
     Switch<3> (start.Size()-1, [&] (auto ICDIM) {
         constexpr int DIM = ICDIM.value+1;
-        auto pnt = ip.GetPoint();
+        Vec<ICDIM+1> pnt = ip.GetPoint();
         if (trafocf)
           trafocf->Evaluate(ip,pnt);
 
         size_t ind[DIM];
-        size_t weight[DIM];
+        double weight[DIM];
         
         for(auto i : Range(DIM))
           {

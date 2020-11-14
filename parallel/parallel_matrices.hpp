@@ -17,6 +17,37 @@ namespace ngla
                                C2D = 2,   // 10
                                C2C = 3 }; // 11
 
+  inline PARALLEL_STATUS RowType (PARALLEL_OP op)
+  {
+    if (op == C2D || op == C2C)
+      return CUMULATED;
+    else
+      return DISTRIBUTED;
+  }
+
+  inline PARALLEL_STATUS ColType (PARALLEL_OP op)
+  {
+    if (op == D2C || op == C2C)
+      return CUMULATED;
+    else
+      return DISTRIBUTED;
+  }
+
+  inline PARALLEL_STATUS InvertType (PARALLEL_STATUS stat)
+  {
+    if (stat == NOT_PARALLEL) return NOT_PARALLEL;
+    return (stat == CUMULATED) ? DISTRIBUTED : CUMULATED;
+  }
+  
+  inline PARALLEL_OP ParallelOp (PARALLEL_STATUS stat_row, PARALLEL_STATUS stat_col)
+  {
+    if (stat_row == CUMULATED)
+      return (stat_col == CUMULATED) ? C2C : C2D;
+    else
+      return (stat_col == CUMULATED) ? D2C : D2D;
+  }
+
+  
   class ParallelMatrix : public BaseMatrix
   {
     shared_ptr<BaseMatrix> mat;
@@ -36,7 +67,9 @@ namespace ngla
 		    shared_ptr<ParallelDofs> acpardofs, PARALLEL_OP op = C2D);
 
     virtual ~ParallelMatrix () override;
-    virtual bool IsComplex() const override { return mat->IsComplex(); } 
+    virtual bool IsComplex() const override { return mat->IsComplex(); }
+    virtual BaseMatrix::OperatorInfo GetOperatorInfo () const override;
+    
     virtual void MultAdd (double s, const BaseVector & x, BaseVector & y) const override ;
     virtual void MultTransAdd (double s, const BaseVector & x, BaseVector & y) const override;
 
@@ -71,6 +104,33 @@ namespace ngla
   };
 
 
+
+  class CumulationOperator : public BaseMatrix
+  {
+    shared_ptr<ParallelDofs> pardofs;
+    
+  public:
+    CumulationOperator (shared_ptr<ParallelDofs> apardofs)
+      : pardofs(apardofs) { } 
+    ~CumulationOperator() override;
+    bool IsComplex() const override { return pardofs->IsComplex(); } 
+    void Mult (const BaseVector & x, BaseVector & y) const override ;
+    void MultAdd (double s, const BaseVector & x, BaseVector & y) const override ;
+    void MultTrans (const BaseVector & x, BaseVector & y) const override;
+    void MultTransAdd (double s, const BaseVector & x, BaseVector & y) const override;
+
+    AutoVector CreateRowVector () const override;
+    AutoVector CreateColVector () const override;
+
+    int VHeight() const override;
+    int VWidth() const override;
+
+    ostream & Print (ostream & ost) const override;
+    PARALLEL_OP GetOpType () const { return PARALLEL_OP::D2C; }
+  };
+
+
+  
 
   
 #ifdef PARALLEL

@@ -341,7 +341,7 @@ namespace ngcomp
   }
 
 
-  MatrixGraph * BilinearForm :: GetGraph (int level, bool symmetric)
+  MatrixGraph BilinearForm :: GetGraph (int level, bool symmetric)
   {
     static Timer timer ("BilinearForm::GetGraph");
     RegionTimer reg (timer);
@@ -431,8 +431,14 @@ namespace ngcomp
         for (int i = 0; i < specialelements.Size(); i++)
           {
             specialelements[i]->GetDofNrs (dnums);
+            QuickSort(dnums);
+            int last = -1;
             for (int d : dnums)
-              if (IsRegularDof(d)) creator.Add (neV+neB+neBB+i, d);
+              {
+                if (d!=last && IsRegularDof(d))
+                    creator.Add (neV+neB+neBB+i, d);
+                last = d;
+              }
           }
 
         if (fespace->UsesDGCoupling())
@@ -561,7 +567,7 @@ namespace ngcomp
       }
     
     graph -> FindSameNZE();
-    return graph;
+    return move(*graph);
   }
 
 
@@ -580,7 +586,13 @@ namespace ngcomp
         // mats.Append (make_shared<BilinearFormApplication> (shared_ptr<BilinearForm>(this, NOOP_Deleter)), lh);
 
         mats.SetSize(ma->GetNLevels());
-        mats.Last() = make_shared<BilinearFormApplication> (dynamic_pointer_cast<BilinearForm>(this->shared_from_this()), lh); 
+        shared_ptr<BaseMatrix> app = 
+          make_shared<BilinearFormApplication> (dynamic_pointer_cast<BilinearForm>(this->shared_from_this()), lh);
+        cout << "craete bilinearformapplication" << endl;
+        if (fespace->IsParallel())
+          app = make_shared<ParallelMatrix> (app, GetTrialSpace()->GetParallelDofs(), GetTestSpace()->GetParallelDofs(), C2D);
+        
+        mats.Last() = app;
       
         if (precompute)
           {
@@ -745,13 +757,13 @@ namespace ngcomp
             has_vb = true;
         if (!has_vb)
           continue;
-        
+
         Array<short> classnr(ma->GetNE(vb));
         ma->IterateElements
           (vb, lh, [&] (auto el, LocalHeap & llh)
            {
              classnr[el.Nr()] = 
-               SwitchET<ET_TRIG,ET_TET>
+               SwitchET<ET_SEGM, ET_TRIG,ET_TET>
                (el.GetType(),
                 [el] (auto et) { return ET_trait<et.ElementType()>::GetClassNr(el.Vertices()); });
            });
@@ -956,14 +968,50 @@ namespace ngcomp
         if (store_inner)
           innermatrix = make_shared<ElementByElementMatrix<SCAL>>(ndof, ne);
         */
-        harmonicext = make_shared<ElementByElementMatrix<SCAL>>(ndof, ndof, nidofs, nodofs, false, false, false);
+        auto ext = make_shared<ElementByElementMatrix<SCAL>>(ndof, ndof, nidofs, nodofs, false, false, false);
+        harmonicext = ext;
+        harmonicext_ptr = ext.get();
+        
         if (!symmetric)
-          harmonicexttrans = make_shared<ElementByElementMatrix<SCAL>>(ndof, ndof, nodofs, nidofs, false, false, false);
+          {
+            auto extt = make_shared<ElementByElementMatrix<SCAL>>(ndof, ndof, nodofs, nidofs, false, false, false);
+            harmonicexttrans = extt;
+            harmonicexttrans_ptr = extt.get();
+          }
         else
-          harmonicexttrans = make_shared<Transpose>(*harmonicext);
-        innersolve = make_shared<ElementByElementMatrix<SCAL>>(ndof, ndof, nidofs, nidofs, false, true, true);
+          {
+            harmonicexttrans = make_shared<Transpose>(*harmonicext);
+            harmonicexttrans_ptr = nullptr;
+          }
+        auto isol = make_shared<ElementByElementMatrix<SCAL>>(ndof, ndof, nidofs, nidofs, false, true, true);
+        innersolve = isol; 
+        innersolve_ptr = isol.get();
+        
         if (store_inner)
-          innermatrix = make_shared<ElementByElementMatrix<SCAL>>(ndof, ndof, nidofs, nidofs, false, true, true);
+          {
+            auto imat = make_shared<ElementByElementMatrix<SCAL>>(ndof, ndof, nidofs, nidofs, false, true, true);
+            innermatrix = imat;
+            innermatrix_ptr = imat.get();
+          }
+        else
+          innermatrix_ptr = nullptr;
+
+        if (this->GetFESpace()->IsParallel())
+          {
+            harmonicext = make_shared<ParallelMatrix> (harmonicext,
+                                                       this->GetTrialSpace()->GetParallelDofs(),
+                                                       this->GetTrialSpace()->GetParallelDofs(), C2C);
+            harmonicexttrans = make_shared<ParallelMatrix> (harmonicexttrans,
+                                                            this->GetTestSpace()->GetParallelDofs(),
+                                                            this->GetTestSpace()->GetParallelDofs(), D2D);
+            innersolve = make_shared<ParallelMatrix> (innersolve,
+                                                      this->GetTestSpace()->GetParallelDofs(),
+                                                      this->GetTrialSpace()->GetParallelDofs(), D2C);
+            if (innermatrix)
+              innermatrix = make_shared<ParallelMatrix> (innermatrix,
+                                                         this->GetTrialSpace()->GetParallelDofs(),
+                                                         this->GetTestSpace()->GetParallelDofs(), C2D);
+          }
       }
   }
 
@@ -1056,7 +1104,7 @@ namespace ngcomp
             size_t gcnt = 0; //global count (for all cases)
             
             for (auto pre : preconditioners)
-              pre -> InitLevel(fespace->GetFreeDofs());
+              pre -> InitLevel(fespace->GetFreeDofs(eliminate_internal));
 
 	    mattimer1a.Stop();
 
@@ -1491,10 +1539,10 @@ namespace ngcomp
                                          LapackAInvBt (dd, db);    // b <--- b d^-1
                                          LapackMultAddABt (db, dc, -1, da);   
                              
-                                         innermatrix ->AddElementMatrix(el.Nr(),cidnums,cidnums,da);
+                                         innermatrix_ptr->AddElementMatrix(el.Nr(),cidnums,cidnums,da);
                                        }
                                        else
-                                       innermatrix ->AddElementMatrix(el.Nr(),idnums,idnums,d);
+                                         innermatrix_ptr->AddElementMatrix(el.Nr(),idnums,idnums,d);
                                      }
                                      
                                      /*
@@ -1537,18 +1585,17 @@ namespace ngcomp
                                        he = -d * Trans(c);
                                      }
                                      
-                                     harmonicext ->AddElementMatrix(el.Nr(),idnums,ednums,he);
+                                     harmonicext_ptr->AddElementMatrix(el.Nr(),idnums,ednums,he);
                                      if (!symmetric)
                                        {
                                          FlatMatrix<SCAL> het (sizeo, sizei, lh);
                                          // het = -b*d | Lapack;
                                          // MinusMultAB (b, d, het);
                                          het = -b * d;
-                                         static_cast<ElementByElementMatrix<SCAL>*>(harmonicexttrans.get())
-                                           ->AddElementMatrix(el.Nr(),ednums,idnums,het);
+                                         harmonicexttrans_ptr->AddElementMatrix(el.Nr(),ednums,idnums,het);
                                        }
                                      
-                                     innersolve ->AddElementMatrix(el.Nr(),idnums,idnums,d);
+                                     innersolve_ptr->AddElementMatrix(el.Nr(),idnums,idnums,d);
                                      {
                                        ThreadRegionTimer reg (statcondtimer_mult, TaskManager::GetThreadId());
                                        NgProfiler::AddThreadFlops (statcondtimer_mult, TaskManager::GetThreadId(),
@@ -2391,7 +2438,7 @@ namespace ngcomp
             
             for (auto pre : preconditioners)
               pre -> FinalizeLevel(&GetMatrix());
-
+            
             if (print)
               (*testout) << "mat = " << endl << GetMatrix() << endl;
 
@@ -2986,7 +3033,10 @@ namespace ngcomp
     lin.Cumulate();
 
     if (nonassemble) {
-      auto app = make_shared<LinearizedBilinearFormApplication> (dynamic_pointer_cast<BilinearForm>(this->shared_from_this()), &lin, clh);
+      shared_ptr<BaseMatrix> app =
+        make_shared<LinearizedBilinearFormApplication> (dynamic_pointer_cast<BilinearForm>(this->shared_from_this()), &lin, clh);
+      if (fespace->IsParallel())
+        app = make_shared<ParallelMatrix> (app, GetTrialSpace()->GetParallelDofs(), GetTestSpace()->GetParallelDofs(), C2D);
       if (this->mats.Size() < this->ma->GetNLevels())
 	mats.Append (app);
       else // we might be using a different vector now
@@ -3067,7 +3117,7 @@ namespace ngcomp
         Array<int> dnums;
 
         for (auto pre : preconditioners)
-          pre -> InitLevel(fespace->GetFreeDofs());
+          pre -> InitLevel(fespace->GetFreeDofs(eliminate_internal));
 
         for (VorB vb : { VOL, BND, BBND, BBBND })
           if (VB_parts[vb].Size())
@@ -3203,7 +3253,7 @@ namespace ngcomp
                  if ((vb == VOL || (!VB_parts[VOL].Size() && vb==BND) ) && (elim_only_hidden || eliminate_internal))
                    {
                      static Timer statcondtimer("static condensation", 2);
-                     RegionTimer regstat (statcondtimer);
+                     ThreadRegionTimer regstat (statcondtimer, TaskManager::GetThreadId());
                      
                      // ArrayMem<int,100> idofs, idofs1, odofs;
                      int i = el.Nr();
@@ -3352,9 +3402,7 @@ namespace ngcomp
                              // he=0.0;
                              // LapackMultAddABt (d, c, -1, he);
                              he = -d * Trans(c);
-                             
-                             static_cast<ElementByElementMatrix<SCAL>*>(harmonicext.get())
-                               ->AddElementMatrix(i,idnums,ednums,he);
+                             harmonicext_ptr->AddElementMatrix(i,idnums,ednums,he);
                                   
                              if (!symmetric)
                                {
@@ -3362,11 +3410,9 @@ namespace ngcomp
                                  // het = 0.0;
                                  // LapackMultAddAB (b, d, -1, het);
                                  het = -b * d;
-                                 static_cast<ElementByElementMatrix<SCAL>*>(harmonicexttrans.get())
-                                   ->AddElementMatrix(i,ednums,idnums,het);
+                                 harmonicexttrans_ptr->AddElementMatrix(i,ednums,idnums,het);
                                }
-                             static_cast<ElementByElementMatrix<SCAL>*>(innersolve.get())
-                               ->AddElementMatrix(i,idnums,idnums,d);
+                             innersolve_ptr->AddElementMatrix(i,idnums,idnums,d);
                              
                              // LapackMultAddAB (b, he, 1.0, a);
                              a += b*he;
@@ -4006,8 +4052,91 @@ namespace ngcomp
     if (geom_free_parts.Size())
       AddMatrixGF(val, x, y, true, clh);
     if (geom_free_parts.Size() == parts.Size()) return;
+
+    if (!MixedSpaces())
+      {
+        for (auto vb : { VOL, BND, BBND, BBBND } )
+          if (VB_parts[vb].Size())
+            {
+              IterateElements 
+                (*fespace, vb, clh, 
+                 [&] (FESpace::Element el, LocalHeap & lh)
+                 {
+                   // ThreadRegionTimer reg (timer_loop, TaskManager::GetThreadId());                   
+                   auto & fel = el.GetFE();
+                   auto & trafo = el.GetTrafo();
+                   auto dnums = el.GetDofs();
+                   
+                   FlatVector<SCAL> elvecx (dnums.Size() * fespace->GetDimension(), lh);
+                   FlatVector<SCAL> elvecy (dnums.Size() * fespace->GetDimension(), lh);
+                   
+                   x.GetIndirect (dnums, elvecx);
+                   this->fespace->TransformVec (el, elvecx, TRANSFORM_SOL);
+                   
+                   for (auto & bfi : VB_parts[vb])
+                     {
+                       if (!bfi->DefinedOn (el.GetIndex())) continue;
+                       if (!bfi->DefinedOnElement (el.Nr())) continue;
+
+                       auto & mapped_trafo = trafo.AddDeformation(bfi->GetDeformation().get(), lh);
+                       
+                       bfi->ApplyElementMatrixTrans (fel, mapped_trafo, elvecx, elvecy, 0, lh);
+
+                       this->fespace->TransformVec (el, elvecy, TRANSFORM_RHS);
+                       
+                       elvecy *= val;
+                       y.AddIndirect (dnums, elvecy, fespace->HasAtomicDofs());  // coloring
+                     }
+                 });
+            } 
+      }
+    else // MixedSpaces
+      {
+        static Timer timer ("Apply Matrix Trans - mixed"); RegionTimer reg(timer);
+
+        for (auto vb : { VOL, BND, BBND } )
+          if (VB_parts[vb].Size())
+            {        
+              IterateElements 
+                (*fespace, vb, clh, 
+                 [&] (ElementId ei, LocalHeap & lh)
+           
+                 {
+                   if (!fespace->DefinedOn (ei)) return;
+                   if (!fespace2->DefinedOn (ei)) return;
+                   const FiniteElement & fel1 = fespace->GetFE (ei, lh);
+                   const FiniteElement & fel2 = fespace2->GetFE (ei, lh);
+                   ElementTransformation & eltrans = ma->GetTrafo (ei, lh);
+             
+                   Array<int> dnums1 (fel1.GetNDof(), lh);
+                   fespace->GetDofNrs (ei, dnums1);
+                   Array<int> dnums2 (fel2.GetNDof(), lh);
+                   fespace2->GetDofNrs (ei, dnums2);
+                   
+                   FlatVector<SCAL> elvecx (dnums2.Size() * fespace2->GetDimension(), lh);
+                   FlatVector<SCAL> elvecy (dnums1.Size() * fespace ->GetDimension(), lh);
+
+                   x.GetIndirect (dnums2, elvecx);
+                   this->fespace2->TransformVec (ei, elvecx, TRANSFORM_SOL);
+
+                   for (auto & bfi : VB_parts[vb])
+                     {
+                       if (!bfi->DefinedOn (this->ma->GetElIndex (ei))) continue;
+                       if (!bfi->DefinedOnElement (ei.Nr())) continue;                        
+
+                       MixedFiniteElement fel(fel1, fel2);
+                       bfi->ApplyElementMatrixTrans (fel, eltrans, elvecx, elvecy, 0, lh);
+                       
+                       this->fespace->TransformVec (ei, elvecy, TRANSFORM_RHS);
+        
+                       elvecy *= val;
+                       y.AddIndirect (dnums1, elvecy);  // coloring	      
+                     }
+                 });
+            }
+      }
     
-    throw Exception ("AddMatrixTrans only supported for geom-free");
+    // throw Exception ("AddMatrixTrans only supported for geom-free");
   }
 
 
@@ -4636,6 +4765,7 @@ namespace ngcomp
     static Timer ty("BilinearForm::Apply - transform y");
     static Timer taddy("BilinearForm::Apply - add y");        
     static Timer tgf("BilinearForm::Apply - geomfree gridfunction");
+    static Timer tgfmult("BilinearForm::Apply - geomfree gridfunction - mult");
     static Timer tm("BilinearForm::Apply - geomfree mult");
     static Timer teval("BilinearForm::Apply - evaluate");
     RegionTimer reg(t);
@@ -4645,7 +4775,8 @@ namespace ngcomp
     auto fesy = GetTestSpace();
     if (transpose) Swap (fesx, fesy);
     auto ma = GetMeshAccess();
-    
+
+    /*
     Array<short> classnr(ma->GetNE());
     ma->IterateElements
       (VOL, lh, [&] (auto el, LocalHeap & llh)
@@ -4661,9 +4792,15 @@ namespace ngcomp
       for (auto i : Range(classnr))
         creator.Add (classnr[i], i);
     Table<size_t> table = creator.MoveTable();
-
+    */
+    
+    const Table<size_t> & table = ma->GetElementsOfClass();
     // auto dof_tablex = fesx->CreateDofTable(VOL);
 
+
+
+#ifdef OLDPARALLEL
+    
     for (auto elclass_inds : table)
       {
         if (elclass_inds.Size() == 0) continue;
@@ -4704,34 +4841,73 @@ namespace ngcomp
             
             VorB element_vb = bfi->ElementVB();
             Facet2ElementTrafo f2el(felx.ElementType(), bfi->ElementVB());
-            // int nfacet = (element_vb==VOL) ? 1 : f2el.GetNFacets();
-            int nfacet = f2el.GetNFacets();
+
+
             
-            for (int facet = 0; facet < nfacet; facet++)
+            Array<Matrix<>> mgfs;
+            {
+              RegionTimer reg(tgf);            
+              for (CoefficientFunction * cf : gridfunction_cfs)
+                {
+                  auto gfcf = dynamic_cast<GridFunctionCoefficientFunction*> (cf);
+                  if (!gfcf)
+                    {
+                      cout << "no gf" << endl;
+                      continue;
+                    }
+                  
+                  auto fes = gfcf->GetGridFunction().GetFESpace();
+                  auto & felgf = fes->GetFE(ei, lh);
+                  Matrix<> mgf(elclass_inds.Size(), felgf.GetNDof()*fes->GetDimension());
+                  auto & vec = gfcf->GetGridFunction().GetVector();
+                  
+                  /*
+                  auto diffop = gfcf->GetDifferentialOperator(trafo.VB());
+                  
+                  FlatMatrix<SIMD<double>> bmat(felgf.GetNDof()*fes->GetDimension()*
+                                                diffop->Dim(), // ??? right Dim
+                                                simd_ir.Size(), lh);
+                  FlatMatrix<double> hbmat(felgf.GetNDof()*fes->GetDimension(),
+                                           diffop->Dim()*    // right Dim ???
+                                           simd_ir.Size()*SIMD<double>::Size(),
+                                           &bmat(0)[0]);
+                  bmat = SIMD<double> (0.0);
+                  diffop->CalcMatrix(felgf, simd_mir, bmat);
+                  
+                  Matrix<SIMD<double>> hmgfxi(elclass_inds.Size(), diffop->Dim()*simd_ir.Size());
+                  FlatMatrix<> hhmgfxi(hmgfxi.Height(), hmgfxi.Width()*SIMD<double>::Size(), &hmgfxi(0)[0]);                      
+                  */  
+                  ParallelForRange
+                    (elclass_inds.Size(), [&] (IntRange myrange) {
+                      Array<DofId> dofnr;
+                      for (auto i : myrange)
+                        {
+                          fes->GetDofNrs( { VOL, elclass_inds[i] }, dofnr);
+                          vec.GetIndirect(dofnr, mgf.Row(i));                    
+                        }
+                    });
+                      
+                  mgfs.Append (move(mgf));
+                }
+            }
+            
+
+            
+            for (auto facet : Range(f2el.GetNFacets()))
               {
-                const SIMD_IntegrationRule * pir;
-                if (element_vb == VOL)
-                  {
-                    pir = &bfi->Get_SIMD_IntegrationRule (felx, lh);
-                  }
-                else
-                  {
-                    const SIMD_IntegrationRule & ir_facet =
-                      bfi->GetSIMDIntegrationRule(f2el.FacetType (facet),
-                                                  felx.Order()+fely.Order()+bfi->GetBonusIntegrationOrder());
-                    pir = &f2el(facet, ir_facet, lh);
-                  }
+                const SIMD_IntegrationRule & simd_ir = (element_vb == VOL) ? 
+                  bfi->Get_SIMD_IntegrationRule (felx, lh)
+                  :
+                  f2el(facet,
+                       bfi->GetSIMDIntegrationRule(f2el.FacetType (facet),
+                                                   felx.Order()+fely.Order()+bfi->GetBonusIntegrationOrder()),
+                       lh);
                 
-                // const SIMD_IntegrationRule& simd_ir = bfi->Get_SIMD_IntegrationRule (felx, lh);
-                const SIMD_IntegrationRule& simd_ir = *pir;
                 auto & simd_mir = trafo(simd_ir, lh);
-                
-                if (element_vb == BND)
-                  simd_mir.ComputeNormalsAndMeasure (felx.ElementType(), facet);
-                
+
                 Array<Matrix<SIMD<double>>> melxi;
                 {
-                  RegionTimer regx(tx);            
+                  RegionTimer regx(tx);
                   for (auto proxynr : Range(trial_proxies))
                     {
                       auto proxy = trial_proxies[proxynr];
@@ -4749,12 +4925,14 @@ namespace ngcomp
                           hhmelxi.Rows(myrange) = melx.Rows(myrange) * hbmatx;
                         });
                       melxi.Append (std::move(hmelxi));
+                      tx.AddFlops (elclass_inds.Size()*hbmatx.Height()*hbmatx.Width());
                     }
                 }
 
                 Array<Matrix<SIMD<double>>> mgfxi;
                 {
-                  RegionTimer reg(tgf);            
+                  RegionTimer reg(tgf);
+                  int cntgf = 0;
                   for (CoefficientFunction * cf : gridfunction_cfs)
                     {
                       auto gfcf = dynamic_cast<GridFunctionCoefficientFunction*> (cf);
@@ -4778,23 +4956,28 @@ namespace ngcomp
                       bmat = SIMD<double> (0.0);
                       diffop->CalcMatrix(felgf, simd_mir, bmat);
                       
-                      Matrix<> mgf(elclass_inds.Size(), felgf.GetNDof()*fes->GetDimension());
+                      // Matrix<> mgf(elclass_inds.Size(), felgf.GetNDof()*fes->GetDimension());
                       Matrix<SIMD<double>> hmgfxi(elclass_inds.Size(), diffop->Dim()*simd_ir.Size());
                       FlatMatrix<> hhmgfxi(hmgfxi.Height(), hmgfxi.Width()*SIMD<double>::Size(), &hmgfxi(0)[0]);                      
-                      auto & vec = gfcf->GetGridFunction().GetVector();
+                      // auto & vec = gfcf->GetGridFunction().GetVector();
                       
                       ParallelForRange
                         (elclass_inds.Size(), [&] (IntRange myrange) {
+                          /*
                           Array<DofId> dofnr;
                           for (auto i : myrange)
                             {
                               fes->GetDofNrs( { VOL, elclass_inds[i] }, dofnr);
                               vec.GetIndirect(dofnr, mgf.Row(i));                    
                             }
-                          hhmgfxi.Rows(myrange) = mgf.Rows(myrange) * hbmat;
+                          */
+                          // RegionTracer rt(TaskManager::GetThreadId(), tgfmult);                          
+                          // hhmgfxi.Rows(myrange) = mgf.Rows(myrange) * hbmat;
+                          hhmgfxi.Rows(myrange) = mgfs[cntgf].Rows(myrange) * hbmat;
                         });
                       
                       mgfxi.Append (move(hmgfxi));
+                      cntgf++;
                     }
                 }
                 
@@ -4802,7 +4985,9 @@ namespace ngcomp
                 for (auto proxy : test_proxies)
                   melyi.Append (Matrix<SIMD<double>>(elclass_inds.Size(),
                                                      proxy->Dimension()*simd_ir.Size()));
-            
+
+                {
+                RegionTimer reg(teval);
                 ParallelForRange
                   (elclass_inds.Size(), [&] (IntRange myrange)
                    {
@@ -4811,9 +4996,13 @@ namespace ngcomp
                      
                      auto & trafo = GetTrialSpace()->GetMeshAccess()->GetTrafo(ei, llh);
                      auto & simd_mir = trafo(simd_ir, llh);
+                     /*
                      if (element_vb == BND)
-                       simd_mir.ComputeNormalsAndMeasure (felx.ElementType(), facet);
-                     
+                       {
+                         simd_mir.ComputeNormalsAndMeasure (felx.ElementType(), facet);
+                         cout << "need it ? " << endl;
+                       }
+                     */
                      const_cast<ElementTransformation&>(trafo).userdata = &ud;
                      
                      ud.fel = &felx;
@@ -4863,7 +5052,7 @@ namespace ngcomp
                            }
                        }
                    });
-
+                }
                 {
                   RegionTimer regy(ty);            
                   for (auto proxynr : Range(test_proxies))
@@ -4918,6 +5107,237 @@ namespace ngcomp
                 });
             }
           }
+#endif
+
+
+
+    for (auto elclass_inds : table)
+      ParallelForRange (elclass_inds.Size(), [&] (IntRange myrange) {
+
+          LocalHeap & clh = lh;
+          LocalHeap lh = clh.Split();
+          if (myrange.Size() == 0) return;
+
+          auto myinds = elclass_inds.Range(myrange);
+        
+          ElementId ei(VOL, myinds[0]);
+          auto & felx = GetTrialSpace()->GetFE (ei, lh);
+          auto & fely = GetTestSpace()->GetFE (ei, lh);
+          auto & trafo = GetTrialSpace()->GetMeshAccess()->GetTrafo(ei, lh);
+          
+          Matrix<> melx(myrange.Size(), felx.GetNDof()*fesx->GetDimension());
+          Matrix<> mely(myrange.Size(), fely.GetNDof()*fesy->GetDimension());
+          mely = 0.0;
+          auto tid = TaskManager::GetThreadId();
+          
+          {
+            RegionTracer rt(tid, tgetx);
+            Array<DofId> dofnr;
+            for (auto i : Range(myinds))
+              {
+                fesx->GetDofNrs( { VOL, myinds[i] }, dofnr);
+                x.GetIndirect(dofnr, melx.Row(i));
+              }
+          }
+
+          
+          for (auto bfi1 : geom_free_parts)
+            {
+              auto bfi = dynamic_pointer_cast<SymbolicBilinearFormIntegrator> (bfi1);
+              
+              auto & trial_proxies = bfi->TrialProxies();
+              auto & test_proxies = bfi->TestProxies();
+              auto & gridfunction_cfs = bfi->GridFunctionCoefficients();
+              auto & cf = bfi->GetCoefficientFunction();
+              
+              VorB element_vb = bfi->ElementVB();
+              Facet2ElementTrafo f2el(felx.ElementType(), bfi->ElementVB());
+              
+              Array<Matrix<>> mgfs;
+              {
+                RegionTracer reg(tid, tgf);            
+                for (CoefficientFunction * cf : gridfunction_cfs)
+                  {
+                    auto gfcf = dynamic_cast<GridFunctionCoefficientFunction*> (cf);
+                    auto fes = gfcf->GetGridFunction().GetFESpace();
+                    auto & felgf = fes->GetFE(ei, lh);
+                    Matrix<> mgf(myinds.Size(), felgf.GetNDof()*fes->GetDimension());
+                    auto & vec = gfcf->GetGridFunction().GetVector();
+                    
+                    Array<DofId> dofnr;
+                    for (auto i : Range(myinds))
+                      {
+                        fes->GetDofNrs( { VOL, myinds[i] }, dofnr);
+                        vec.GetIndirect(dofnr, mgf.Row(i));                    
+                      }
+                    mgfs.Append (move(mgf));
+                  }
+              }
+
+              
+              for (auto facet : Range(f2el.GetNFacets()))
+                {
+                  const SIMD_IntegrationRule & simd_ir = (element_vb == VOL) ? 
+                    bfi->Get_SIMD_IntegrationRule (felx, lh)
+                    :
+                    f2el(facet,
+                         bfi->GetSIMDIntegrationRule(f2el.FacetType (facet),
+                                                     felx.Order()+fely.Order()+bfi->GetBonusIntegrationOrder()),
+                         lh);
+                  
+                  auto & simd_mir = trafo(simd_ir, lh);
+                  
+                  Array<Matrix<SIMD<double>>> melxi;
+                  {
+                    RegionTracer regx(tid, tx);
+                    for (auto proxynr : Range(trial_proxies))
+                      {
+                        auto proxy = trial_proxies[proxynr];
+                        FlatMatrix<SIMD<double>> bmatx(melx.Width()*proxy->Dimension(),
+                                                       simd_ir.Size(), lh);
+                        FlatMatrix<double> hbmatx(melx.Width(),
+                                                  proxy->Dimension()*simd_ir.Size()*SIMD<double>::Size(),
+                                                  &bmatx(0)[0]);
+                        
+                        bmatx = SIMD<double> (0.0);
+                        proxy->Evaluator()->CalcMatrix(felx, simd_mir, bmatx);
+                        Matrix<SIMD<double>> hmelxi(myinds.Size(), proxy->Dimension()*simd_ir.Size());
+                        FlatMatrix<> hhmelxi(hmelxi.Height(), hmelxi.Width()*SIMD<double>::Size(), &hmelxi(0)[0]);
+
+                        hhmelxi = melx * hbmatx;
+
+                        melxi.Append (std::move(hmelxi));
+                      }
+                  }
+
+                  Array<Matrix<SIMD<double>>> mgfxi;
+                  {
+                    RegionTracer reg(tid, tgf);
+                    int cntgf = 0;
+                    for (CoefficientFunction * cf : gridfunction_cfs)
+                      {
+                        auto gfcf = dynamic_cast<GridFunctionCoefficientFunction*> (cf);
+                      
+                        auto fes = gfcf->GetGridFunction().GetFESpace();
+                        auto & felgf = fes->GetFE(ei, lh);
+                        auto diffop = gfcf->GetDifferentialOperator(trafo.VB());
+                        
+                        FlatMatrix<SIMD<double>> bmat(felgf.GetNDof()*fes->GetDimension()*
+                                                      diffop->Dim(), // ??? right Dim
+                                                      simd_ir.Size(), lh);
+                        FlatMatrix<double> hbmat(felgf.GetNDof()*fes->GetDimension(),
+                                                 diffop->Dim()*    // right Dim ???
+                                                 simd_ir.Size()*SIMD<double>::Size(),
+                                                 &bmat(0)[0]);
+                        bmat = SIMD<double> (0.0);
+                        diffop->CalcMatrix(felgf, simd_mir, bmat);
+                        
+                        Matrix<SIMD<double>> hmgfxi(myinds.Size(), diffop->Dim()*simd_ir.Size());
+                        FlatMatrix<> hhmgfxi(hmgfxi.Height(), hmgfxi.Width()*SIMD<double>::Size(), &hmgfxi(0)[0]);                      
+                        
+                        hhmgfxi = mgfs[cntgf] * hbmat;
+                        
+                        mgfxi.Append (move(hmgfxi));
+                        cntgf++;
+                      }
+                  }
+                
+                  Array<Matrix<SIMD<double>>> melyi;
+                  for (auto proxy : test_proxies)
+                    melyi.Append (Matrix<SIMD<double>>(myinds.Size(),
+                                                       proxy->Dimension()*simd_ir.Size()));
+                  
+                  {
+                    RegionTracer reg(tid, teval);
+
+                    ProxyUserData ud(trial_proxies.Size(), gridfunction_cfs.Size(), lh);
+                     
+                     auto & trafo = GetTrialSpace()->GetMeshAccess()->GetTrafo(ei, lh);
+                     auto & simd_mir = trafo(simd_ir, lh);
+                     const_cast<ElementTransformation&>(trafo).userdata = &ud;
+                     
+                     ud.fel = &felx;
+                     
+                     for (auto i : Range(myinds))
+                       {
+                         for (int proxynr : Range(trial_proxies))
+                           {
+                             auto proxy = trial_proxies[proxynr];
+                             ud.AssignMemory (proxy, FlatMatrix<SIMD<double>> (proxy->Dimension(), simd_ir.Size(), &melxi[proxynr](i,0)));
+                           }
+                         
+                         for (int cfnr : Range(gridfunction_cfs))
+                           {
+                             CoefficientFunction * cf = gridfunction_cfs[cfnr];
+                             ud.AssignMemory (cf, FlatMatrix<SIMD<double>> (cf->Dimension(), simd_ir.Size(), &mgfxi[cfnr](i,0)));
+                           }
+                             
+                         for (auto proxynr : Range(test_proxies))
+                           {
+                             auto proxy = test_proxies[proxynr];
+                             FlatMatrix<SIMD<double>> simd_proxyvalues(proxy->Dimension(), simd_ir.Size(), &melyi[proxynr](i,0));
+                             {
+                               // RegionTracer rt(TaskManager::GetThreadId(), teval);
+                               for (int k = 0; k < proxy->Dimension(); k++)
+                                 {
+                                   ud.testfunction = proxy;
+                                   ud.test_comp = k;
+                                   cf -> Evaluate (simd_mir, simd_proxyvalues.Rows(k,k+1));
+                                 }
+                             }
+                           }
+                       }
+                  }
+                  {
+                    RegionTracer regy(tid, ty);            
+                    for (auto proxynr : Range(test_proxies))
+                      {
+                        auto proxy = test_proxies[proxynr];
+                        FlatMatrix<SIMD<double>> bmaty(mely.Width()*proxy->Dimension(),
+                                                       simd_ir.Size(), lh);
+                        FlatMatrix<double> hbmaty(mely.Width(),
+                                                  proxy->Dimension()*simd_ir.Size()*SIMD<double>::Size(),
+                                                  &bmaty(0)[0]);
+
+                        bmaty = SIMD<double> (0.0);                      
+                        proxy->Evaluator()->CalcMatrix(fely, simd_mir, bmaty);
+                        for (size_t i = 0; i < bmaty.Height(); i++)
+                          {
+                            auto row = bmaty.Row(i);
+                            for (size_t j = 0; j < row.Size(); j++)
+                              row(j) *= simd_mir[j].GetWeight(); 
+                          }
+                        
+                        FlatMatrix<> hmely(melyi[proxynr].Height(),
+                                           melyi[proxynr].Width()*SIMD<double>::Size(),
+                                           &melyi[proxynr](0,0)[0]);
+                        
+                        mely += hmely * Trans(hbmaty);
+                      }
+                  }
+                } // for facet
+            } // for integrator   
+                  
+          {
+            RegionTracer reg(tid, taddy);
+            bool needs_atomic = fesy->ElementColoring().Size() > 1;
+            
+            Array<DofId> dofnr;
+            Vector<SCAL> elys(fely.GetNDof()*fesy->GetDimension());
+            
+            for (auto i : Range(myinds))
+              {
+                fesy->GetDofNrs({VOL, myinds[i]}, dofnr);
+                elys = val * mely.Row(i);
+                y.AddIndirect(dofnr, elys, needs_atomic);     // atomic add
+              }
+          }
+        });
+
+        
+
+
+
         
         /*
         Matrix<> temp_x(elclass_inds.Size(), !transpose ? elmat.Width() : elmat.Height());
@@ -4961,7 +5381,6 @@ namespace ngcomp
            });
         */
       }
-  }
   
   
   
@@ -5238,12 +5657,7 @@ namespace ngcomp
   T_BilinearForm<TM,TV>::
   T_BilinearForm (shared_ptr<FESpace> afespace, const string & aname, const Flags & flags)
     : S_BilinearForm<TSCAL> (afespace, aname, flags)
-  { 
-    if (this->fespace->LowOrderFESpacePtr())
-      this->low_order_bilinear_form = 
-        make_shared<T_BilinearForm<TM,TV>> 
-        (this->fespace->LowOrderFESpacePtr(), aname+string(" low-order"), flags);
-  }
+  { }
 
   template <class TM, class TV>
   T_BilinearForm<TM,TV>::
@@ -5252,24 +5666,35 @@ namespace ngcomp
                   const string & aname,
                   const Flags & flags)
     : S_BilinearForm<TSCAL> (afespace, afespace2, aname, flags) 
-  {
-    ;
-  }
+  { } 
 
   template <class TM, class TV>
-  T_BilinearForm<TM,TV>::
-  ~T_BilinearForm ()
+  T_BilinearForm<TM,TV>:: ~T_BilinearForm () { }
+
+  template <class TM, class TV>
+    shared_ptr<BilinearForm>  T_BilinearForm<TM,TV>::
+    GetLowOrderBilinearForm()
   {
-    /*
-    for (int i = 0; i < this->mats.Size(); i++)
+    if (this->low_order_bilinear_form)
+      return this->low_order_bilinear_form;
+    
+    auto lospace = this->fespace->LowOrderFESpacePtr();
+    if (!lospace) return nullptr;
+
+    cout << IM(3) << "creating low order biform on demand" << endl;
+    this->low_order_bilinear_form = 
+      make_shared<T_BilinearForm<TM,TV>> (lospace, this->name+string(" low-order"), this->flags);
+
+    for (auto igt : this->parts)
+      this->low_order_bilinear_form->AddIntegrator(igt);      
+
+    if (this->mats.Size())
       {
-      delete this->mats[i];
-        this->mats[i].reset();
+        LocalHeap lh(10*1000*1000);
+        this->low_order_bilinear_form -> Assemble(lh);
       }
-    */
+    return this->low_order_bilinear_form;
   }
-
-
 
   template <class TM, class TV>
   void T_BilinearForm<TM,TV>::
@@ -5278,10 +5703,10 @@ namespace ngcomp
     if (this->mats.Size() == this->ma->GetNLevels())
       return;
 
-    MatrixGraph * graph = this->GetGraph (this->ma->GetNLevels()-1, false);
+    MatrixGraph graph = this->GetGraph (this->ma->GetNLevels()-1, false);
 
-    auto spmat = make_shared<SparseMatrix<TM,TV,TV>> (*graph, 1);
-    mymatrix = spmat.get();
+    auto spmat = make_shared<SparseMatrix<TM,TV,TV>> (graph, 1);
+    mymatrix = spmat; // .get();
     
     if (this->spd) spmat->SetSPD();
     shared_ptr<BaseMatrix> mat = spmat;
@@ -5294,7 +5719,7 @@ namespace ngcomp
     this->mats.Last() = mat;
     // this->mats.Append (mat);
 
-    delete graph;
+    // delete graph;
 
     if (!this->multilevel || this->low_order_bilinear_form)
       for (int i = 0; i < this->mats.Size()-1; i++)
@@ -5318,26 +5743,26 @@ namespace ngcomp
 
 
   template <class TM, class TV>
-  shared_ptr<BaseVector> T_BilinearForm<TM, TV>::
+  unique_ptr<BaseVector> T_BilinearForm<TM, TV>::
   CreateRowVector() const
   {
     auto afespace = this->GetTrialSpace();
     
     if (afespace->IsParallel())
-      return make_shared<ParallelVVector<TV>> (afespace->GetNDof(), afespace->GetParallelDofs());
+      return make_unique<ParallelVVector<TV>> (afespace->GetNDof(), afespace->GetParallelDofs());
     else
-      return make_shared<VVector<TV>> (afespace->GetNDof());
+      return make_unique<VVector<TV>> (afespace->GetNDof());
   }
   
   template <class TM, class TV>
-  shared_ptr<BaseVector> T_BilinearForm<TM, TV>::
+    unique_ptr<BaseVector> T_BilinearForm<TM, TV>::
   CreateColVector() const
   {
     auto afespace = this->GetTestSpace();
     if (afespace->IsParallel())
-      return make_shared<ParallelVVector<TV>> (afespace->GetNDof(), afespace->GetParallelDofs());
+      return make_unique<ParallelVVector<TV>> (afespace->GetNDof(), afespace->GetParallelDofs());
     else
-      return make_shared<VVector<TV>> (afespace->GetNDof());
+      return make_unique<VVector<TV>> (afespace->GetNDof());
   }
 
 
@@ -5406,18 +5831,46 @@ namespace ngcomp
                            const Flags & flags)
     : S_BilinearForm<TSCAL> (afespace, aname, flags) 
   {
+    /*
     if (this->fespace->LowOrderFESpacePtr())
       {
         this->low_order_bilinear_form = 
           make_shared<T_BilinearFormSymmetric<TM,TV>> 
           (this->fespace->LowOrderFESpacePtr(), aname+string(" low-order"), flags);
       }
+    */
   }
 
   template <class TM, class TV>
   T_BilinearFormSymmetric<TM,TV> :: 
   ~T_BilinearFormSymmetric ()
   { ; }
+
+  template <class TM, class TV>
+    shared_ptr<BilinearForm>  T_BilinearFormSymmetric<TM,TV>::
+    GetLowOrderBilinearForm()
+  {
+    if (this->low_order_bilinear_form)
+      return this->low_order_bilinear_form;
+    
+    auto lospace = this->fespace->LowOrderFESpacePtr();
+    if (!lospace) return nullptr;
+
+    cout << IM(3) << "creating low order biform on demand" << endl;
+    this->low_order_bilinear_form = 
+      make_shared<T_BilinearFormSymmetric<TM,TV>> (lospace, this->name+string(" low-order"), this->flags);
+
+    for (auto igt : this->parts)
+      this->low_order_bilinear_form->AddIntegrator(igt);      
+
+    if (this->mats.Size())
+      {
+        LocalHeap lh(10*1000*1000);
+        this->low_order_bilinear_form -> Assemble(lh);
+      }
+    return this->low_order_bilinear_form;
+  }
+
 
   
   template <class TM, class TV>
@@ -5427,10 +5880,10 @@ namespace ngcomp
     if (this->mats.Size() == this->ma->GetNLevels())
       return;
 
-    MatrixGraph * graph = this->GetGraph (this->ma->GetNLevels()-1, true);
+    MatrixGraph graph = this->GetGraph (this->ma->GetNLevels()-1, true);
 
-    auto spmat = make_shared<SparseMatrixSymmetric<TM,TV>> (*graph, 1);
-    mymatrix = spmat.get();
+    auto spmat = make_shared<SparseMatrixSymmetric<TM,TV>> (graph, 1);
+    mymatrix = spmat; // .get();
     
     if (this->spd) spmat->SetSPD();
     shared_ptr<BaseMatrix> mat = spmat;
@@ -5441,7 +5894,7 @@ namespace ngcomp
     
     this->mats.Append (mat);
 
-    delete graph;
+    // delete graph;
 
     if (!this->multilevel || this->low_order_bilinear_form)
       for (int i = 0; i < this->mats.Size()-1; i++)
@@ -5457,42 +5910,32 @@ namespace ngcomp
   {
     if (!this->multilevel || this->low_order_bilinear_form)
       for (int i = 0; i < this->mats.Size(); i++)
-        {
-          /*
-          delete this->mats[i];
-          this->mats[i] = 0;
-          */
-          this->mats[i].reset();
-        }
+        this->mats[i].reset();
   }
 
 
   template <class TM, class TV>
-  shared_ptr<BaseVector> T_BilinearFormSymmetric<TM, TV>::
+  unique_ptr<BaseVector> T_BilinearFormSymmetric<TM, TV>::
   CreateRowVector() const
   {
-    auto afespace = this->GetTrialSpace();
-#ifdef PARALLEL
-    if ( afespace->IsParallel() )
-      return make_shared<ParallelVVector<TV>> (afespace->GetNDof(), afespace->GetParallelDofs());
+    auto fes = this->GetTrialSpace();
+
+    if ( fes->IsParallel() )
+      return make_unique<ParallelVVector<TV>> (fes->GetParallelDofs());
     else
-#endif
-      // return new VVector<TV> (afespace->GetNDof());
-      return make_shared<VVector<TV>> (afespace->GetNDof());
+      return make_unique<VVector<TV>> (fes->GetNDof());
   }
 
   template <class TM, class TV>
-  shared_ptr<BaseVector> T_BilinearFormSymmetric<TM, TV>::
+  unique_ptr<BaseVector> T_BilinearFormSymmetric<TM, TV>::
   CreateColVector() const
   {
-    auto afespace = this->GetTestSpace();
-#ifdef PARALLEL
-    if ( afespace->IsParallel() )
-      return make_shared<ParallelVVector<TV>> (afespace->GetNDof(), afespace->GetParallelDofs());
+    auto fes = this->GetTestSpace();
+
+    if ( fes->IsParallel() )
+      return make_unique<ParallelVVector<TV>> (fes->GetParallelDofs());
     else
-#endif
-      // return new VVector<TV> (afespace->GetNDof());
-      return make_shared<VVector<TV>> (afespace->GetNDof());
+      return make_unique<VVector<TV>> (fes->GetNDof());
   }
   
 
@@ -5594,31 +6037,25 @@ namespace ngcomp
 
 
   template <class TM>
-  shared_ptr<BaseVector> T_BilinearFormDiagonal<TM> :: 
+  unique_ptr<BaseVector> T_BilinearFormDiagonal<TM> :: 
   CreateRowVector() const
   {
-    auto afespace = this->GetTrialSpace();
-#ifdef PARALLEL
-    if ( afespace->IsParallel() )
-      return make_shared<ParallelVVector<TV_COL>> (afespace->GetNDof(), afespace->GetParallelDofs());
+    auto fes = this->GetTrialSpace();
+    if ( fes->IsParallel() )
+      return make_unique<ParallelVVector<TV_COL>> (fes->GetParallelDofs());
     else
-#endif
-      // return new VVector<TV_COL> (afespace->GetNDof());
-      return make_shared<VVector<TV_COL>> (afespace->GetNDof());
+      return make_unique<VVector<TV_COL>> (fes->GetNDof());
   }
   
   template <class TM>
-  shared_ptr<BaseVector> T_BilinearFormDiagonal<TM> :: 
+  unique_ptr<BaseVector> T_BilinearFormDiagonal<TM> :: 
   CreateColVector() const
   {
-    auto afespace = this->GetTestSpace();
-#ifdef PARALLEL
-    if ( afespace->IsParallel() )
-      return make_shared<ParallelVVector<TV_COL>> (afespace->GetNDof(), afespace->GetParallelDofs());
+    auto fes = this->GetTestSpace();
+    if ( fes->IsParallel() )
+      return make_unique<ParallelVVector<TV_COL>> (fes->GetParallelDofs());
     else
-#endif
-      // return new VVector<TV_COL> (afespace->GetNDof());
-      return make_shared<VVector<TV_COL>> (afespace->GetNDof());
+      return make_unique<VVector<TV_COL>> (fes->GetNDof());
   }
 
 
@@ -5888,8 +6325,11 @@ namespace ngcomp
       }
 
     
-    bool symmetric_storage = flags.GetDefineFlag ("symmetric") || flags.GetDefineFlag ("spd");
-    if (flags.GetDefineFlag("nonsym") || flags.GetDefineFlag("nonsym_storage")) symmetric_storage = false;
+    // bool symmetric_storage = flags.GetDefineFlag ("symmetric") || flags.GetDefineFlag ("spd");
+    // if (flags.GetDefineFlag("nonsym") || flags.GetDefineFlag("nonsym_storage")) symmetric_storage = false;
+    bool symmetric_storage = false;
+    if (flags.GetDefineFlagX("nonsym_storage").IsFalse() || flags.GetDefineFlagX("symmetric_storage").IsTrue())
+      symmetric_storage = true;
     
     
     if (symmetric_storage)
@@ -6300,23 +6740,23 @@ namespace ngcomp
   { ; }
 
   template <class SCAL>
-  shared_ptr<BaseVector> S_BilinearFormNonAssemble<SCAL> :: 
+  unique_ptr<BaseVector> S_BilinearFormNonAssemble<SCAL> :: 
   CreateRowVector() const
   {
     auto afespace = this->GetTrialSpace();
     if (afespace->IsParallel())
-      return make_shared<S_ParallelBaseVectorPtr<SCAL>> (afespace->GetNDof(), afespace->GetDimension(), afespace->GetParallelDofs(), DISTRIBUTED);
-    return make_shared<S_BaseVectorPtr<SCAL>> (afespace->GetNDof(), afespace->GetDimension());
+      return make_unique<S_ParallelBaseVectorPtr<SCAL>> (afespace->GetNDof(), afespace->GetDimension(), afespace->GetParallelDofs(), DISTRIBUTED);
+    return make_unique<S_BaseVectorPtr<SCAL>> (afespace->GetNDof(), afespace->GetDimension());
   }
   
   template <class SCAL>
-  shared_ptr<BaseVector> S_BilinearFormNonAssemble<SCAL> :: 
+  unique_ptr<BaseVector> S_BilinearFormNonAssemble<SCAL> :: 
   CreateColVector() const
   {
     auto afespace = this->GetTestSpace();
     if (afespace->IsParallel())
-      return make_shared<S_ParallelBaseVectorPtr<SCAL>> (afespace->GetNDof(), afespace->GetDimension(), afespace->GetParallelDofs(), DISTRIBUTED);
-    return make_shared<S_BaseVectorPtr<SCAL>> (afespace->GetNDof(), afespace->GetDimension());
+      return make_unique<S_ParallelBaseVectorPtr<SCAL>> (afespace->GetNDof(), afespace->GetDimension(), afespace->GetParallelDofs(), DISTRIBUTED);
+    return make_unique<S_BaseVectorPtr<SCAL>> (afespace->GetNDof(), afespace->GetDimension());
   }
   
   
@@ -6343,14 +6783,14 @@ namespace ngcomp
 
 
   template<class SCAL>
-  shared_ptr<BaseVector> ElementByElement_BilinearForm<SCAL> :: CreateRowVector() const
+    unique_ptr<BaseVector> ElementByElement_BilinearForm<SCAL> :: CreateRowVector() const
   {
-    return make_shared<VVector<SCAL>> (this->GetTrialSpace()->GetNDof());
+    return make_unique<VVector<SCAL>> (this->GetTrialSpace()->GetNDof());
   }
   template<class SCAL>
-  shared_ptr<BaseVector> ElementByElement_BilinearForm<SCAL> :: CreateColVector() const
+    unique_ptr<BaseVector> ElementByElement_BilinearForm<SCAL> :: CreateColVector() const
   {
-    return make_shared<VVector<SCAL>> (this->GetTestSpace()->GetNDof());
+    return make_unique<VVector<SCAL>> (this->GetTestSpace()->GetNDof());
   }
 
   template<class SCAL>

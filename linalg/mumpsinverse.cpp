@@ -864,7 +864,7 @@ namespace ngla
     y.SetParallelStatus (CUMULATED);
 
 
-    NgsMPI_Comm comm = paralleldofs->GetCommunicator();
+    NgMPI_Comm comm = paralleldofs->GetCommunicator();
     int ntasks = comm.Size();
     int id = comm.Rank();
 
@@ -944,19 +944,19 @@ namespace ngla
   template <class TM, class TV>
   AutoVector ParallelMumpsInverse<TM,TV> :: CreateVector () const
   {
-    return make_shared<ParallelVVector<TV>> (paralleldofs->GetNDofLocal(), paralleldofs);
+    return make_unique<ParallelVVector<TV>> (paralleldofs->GetNDofLocal(), paralleldofs);
   }
 
   template <class TM, class TV>
   AutoVector ParallelMumpsInverse<TM,TV> :: CreateRowVector () const
   {
-    return make_shared<ParallelVVector<TV>> (paralleldofs->GetNDofLocal(), paralleldofs);
+    return make_unique<ParallelVVector<TV>> (paralleldofs->GetNDofLocal(), paralleldofs);
   }
 
   template <class TM, class TV>
   AutoVector ParallelMumpsInverse<TM,TV> :: CreateColVector () const
   {
-    return make_shared<ParallelVVector<TV>> (paralleldofs->GetNDofLocal(), paralleldofs);
+    return make_unique<ParallelVVector<TV>> (paralleldofs->GetNDofLocal(), paralleldofs);
   }
 
 

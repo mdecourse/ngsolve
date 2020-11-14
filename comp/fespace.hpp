@@ -84,6 +84,30 @@ ANY                  1 1 1 1 | 15
   
   using ngmg::Prolongation;
 
+
+  struct ProxyNode : public shared_ptr<ProxyFunction>
+  {
+    // shared_ptr<ProxyFunction> proxy;
+    std::vector<ProxyNode> list;
+    
+    ProxyNode (shared_ptr<ProxyFunction> _proxy) : shared_ptr<ProxyFunction>(_proxy) { }
+    ProxyNode (std::vector<ProxyNode> _list) : list(_list) { }
+    auto operator* () const { return shared_ptr<ProxyFunction> (*this); }
+    auto operator[] (int i) const { return list[i]; }
+
+    void SetFESpace (shared_ptr<FESpace> fespace)
+    {
+      if (*this)
+        shared_ptr<ProxyFunction> (*this) -> SetFESpace(fespace);
+      else
+        for (auto node : list)
+          node.SetFESpace(fespace);
+    }
+  };
+
+
+
+  
   /**
      Base class for finite element space.
      Provides finite elements, global degrees of freedom, 
@@ -504,8 +528,10 @@ ANY                  1 1 1 1 | 15
     // const FiniteElement & GetFE (ELEMENT_TYPE type) const;
 
     /// according low-order FESpace (if available)
+    [[deprecated("Use LowOrderFESpacePtr instead!")]]            
     FESpace & LowOrderFESpace () { return *low_order_space; }
     /// according low-order FESpace (if available)
+    [[deprecated("Use LowOrderFESpacePtr instead!")]]                
     const FESpace & LowOrderFESpace () const { return *low_order_space; }
     shared_ptr<FESpace> LowOrderFESpacePtr () const { return low_order_space; }
     shared_ptr<BaseMatrix> LowOrderEmbedding () const { return low_order_embedding; }
@@ -643,6 +669,13 @@ ANY                  1 1 1 1 | 15
       return integrator[vb];
     }
     */
+
+    ProxyNode GetProxyFunction(bool testfunction) const;
+    virtual ProxyNode MakeProxyFunction (bool testfunction,
+                                         const function<shared_ptr<ProxyFunction>(shared_ptr<ProxyFunction>)> & addblock) const;
+    
+    auto GetTrialFunction() const { return GetProxyFunction(false); }
+    auto GetTestFunction() const { return GetProxyFunction(true); }
     
 
     virtual shared_ptr<BaseMatrix> GetMassOperator (shared_ptr<CoefficientFunction> rho,
@@ -1138,6 +1171,7 @@ ANY                  1 1 1 1 | 15
 
     /// add an additional component space
     void AddSpace (shared_ptr<FESpace> fes);
+    auto & Spaces() const { return spaces; }
 
     ///
     string GetClassName () const override
@@ -1150,6 +1184,9 @@ ANY                  1 1 1 1 | 15
     /// updates also components
     void FinalizeUpdate() override;
 
+    ProxyNode MakeProxyFunction (bool testfunction,
+                                 const function<shared_ptr<ProxyFunction>(shared_ptr<ProxyFunction>)> & addblock) const override;
+
     /// copies dofcoupling from components
     void UpdateCouplingDofArray() override;
     
@@ -1159,13 +1196,18 @@ ANY                  1 1 1 1 | 15
     ///
     // virtual size_t GetNDofLevel (int level) const { return ndlevel[level]; }
 
-    IntRange GetRange (int spacenr) const
+    DofRange GetRange (int spacenr) const
     {
       if (spacenr+1 >= cummulative_nd.Size())
         throw Exception("spacenr >= cummulative_nd.Size() in CompoundFESpace!");
-      return IntRange(cummulative_nd[spacenr], cummulative_nd[spacenr+1]);
+      
+      return DofRange(IntRange(cummulative_nd[spacenr], cummulative_nd[spacenr+1]),
+                      spaces[spacenr]->GetParallelDofs());
     }
 
+    shared_ptr<BaseMatrix> EmbeddingOperator (int spacenr) const;
+    shared_ptr<BaseMatrix> RestrictionOperator (int spacenr) const;
+    
     /// get component space
     shared_ptr<FESpace> operator[] (int i) const { return spaces[i]; }
 
@@ -1210,6 +1252,62 @@ ANY                  1 1 1 1 | 15
   };
 
 
+
+  class NGS_DLL_HEADER CompoundFESpaceAllSame : public CompoundFESpace
+  {
+  public:
+    CompoundFESpaceAllSame (shared_ptr<FESpace> space, int dim, const Flags & flags,
+                            bool checkflags = false);
+    virtual string GetClassName () const override;
+  };
+
+
+  
+  template <typename BASESPACE>
+  class VectorFESpace : public CompoundFESpace
+  {
+  public:
+    VectorFESpace (shared_ptr<MeshAccess> ama, const Flags & flags, 
+                   bool checkflags = false)
+      : CompoundFESpace (ama, flags)
+    {
+      Array<string> dirichlet_comp;
+      string dirnames[] = { "dirichletx", "dirichlety", "dirichletz" };
+      for (int i = 0; i <  ma->GetDimension(); i++)
+        {
+          Flags tmpflags = flags;
+          if (flags.StringFlagDefined(dirnames[i]))
+            tmpflags.SetFlag ("dirichlet", flags.GetStringFlag(dirnames[i]));
+          if (flags.StringFlagDefined(dirnames[i]+"_bbnd"))
+            tmpflags.SetFlag ("dirichlet_bbnd", flags.GetStringFlag(dirnames[i]+"_bbnd"));
+          AddSpace (make_shared<BASESPACE> (ama, tmpflags));
+        }
+
+      for (auto vb : { VOL, BND, BBND, BBBND })
+        {
+          if (auto eval = spaces[0] -> GetEvaluator(vb))
+            evaluator[vb] = make_shared<VectorDifferentialOperator> (eval, ma->GetDimension());
+          if (auto fluxeval = spaces[0] -> GetFluxEvaluator(vb))
+            flux_evaluator[vb] = make_shared<VectorDifferentialOperator> (fluxeval, ma->GetDimension());
+        }
+
+      auto additional = spaces[0]->GetAdditionalEvaluators();
+      for (int i = 0; i < additional.Size(); i++)
+        additional_evaluators.Set (additional.GetName(i),
+                                   make_shared<VectorDifferentialOperator>(additional[i], ma->GetDimension()));
+
+      type = "Vector"+(*this)[0]->type;
+    }
+
+    virtual string GetClassName () const override
+    {
+      return "Vector"+ (*this)[0]->GetClassName();
+    }
+    
+  };
+
+
+  
   class NGS_DLL_HEADER ApplyMass : public BaseMatrix
   {
   protected:
@@ -1373,7 +1471,7 @@ ANY                  1 1 1 1 | 15
 
 
 
-
+#ifdef OLD
   // #ifdef PARALLEL
 
   class ParallelMeshDofs : public ParallelDofs
@@ -1401,7 +1499,8 @@ ANY                  1 1 1 1 | 15
   };
 
 #endif
-
+#endif
+  
 }
 
 

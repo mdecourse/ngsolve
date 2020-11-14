@@ -28,8 +28,6 @@ namespace ngla
     /// 
     BaseMatrix ();
     /// 
-    // BaseMatrix (const BaseMatrix & amat);
-    //
     BaseMatrix (shared_ptr<ParallelDofs> aparalleldofs); 
 
   public:
@@ -73,9 +71,7 @@ namespace ngla
     virtual ostream & Print (ostream & ost) const;
     virtual Array<MemoryUsage> GetMemoryUsage () const;
     virtual size_t NZE () const;
-    // virtual const void * Data() const;
-    // virtual void * Data();
-    
+
     template <typename T>
       shared_ptr<T> SharedFromThis()
     { return dynamic_pointer_cast<T> (shared_from_this()); }
@@ -83,8 +79,6 @@ namespace ngla
     virtual void Update() { ; } 
     /// creates matrix of same type
     virtual shared_ptr<BaseMatrix> CreateMatrix () const;
-    /// creates matrix of same type
-    // virtual BaseMatrix * CreateMatrix (const Array<int> & elsperrow) const;
     /// creates a matching vector, size = width
     virtual AutoVector CreateRowVector () const = 0;
     /// creates a matching vector, size = height
@@ -109,9 +103,9 @@ namespace ngla
    /// y += s Trans(matrix) * x
     virtual void MultConjTransAdd (Complex s, const BaseVector & x, BaseVector & y) const;
 
-
-
-
+    /// y += alpha M x
+    virtual void MultAdd (FlatVector<double> alpha, const MultiVector & x, MultiVector & y) const;
+    
     /**
        to split mat x vec for symmetric matrices
        only rows with inner or cluster true need by added (but more can be ...)
@@ -136,7 +130,17 @@ namespace ngla
     virtual INVERSETYPE  GetInverseType () const;
 
     virtual void DoArchive (Archive & ar);
+
+    class OperatorInfo
+    {
+    public:
+      string name = "undef";
+      size_t height = 0, width = 0;
+      Array<const BaseMatrix*> childs;
+    };
     
+    virtual BaseMatrix::OperatorInfo GetOperatorInfo () const;
+    void PrintOperatorInfo (ostream & ost, int level = 0) const;
   private:
     BaseMatrix & operator= (const BaseMatrix & m2) { return *this; }
   };
@@ -239,10 +243,13 @@ namespace ngla
 
 
 
-  class DynamicMatVecExpression : public DynamicBaseExpression
+  class NGS_DLL_HEADER DynamicMatVecExpression : public DynamicBaseExpression
   {
     shared_ptr<BaseMatrix> m;
     shared_ptr<BaseVector> v;
+
+    AutoVector CreateVector() const override
+    { return m->CreateColVector(); }    
     
     void AssignTo (double s, BaseVector & v2) const override
     {
@@ -274,7 +281,7 @@ namespace ngla
   /**
      The Transpose of a BaseMatrix.
   */
-  class Transpose : public BaseMatrix
+  class NGS_DLL_HEADER Transpose : public BaseMatrix
   {
     const BaseMatrix & bm;
     shared_ptr<BaseMatrix> spbm;
@@ -284,7 +291,8 @@ namespace ngla
     Transpose (shared_ptr<BaseMatrix> aspbm) : bm(*aspbm), spbm(aspbm) { ; }
     ///
     virtual bool IsComplex() const override { return bm.IsComplex(); }
-
+    virtual BaseMatrix::OperatorInfo GetOperatorInfo () const override;
+    
     virtual AutoVector CreateRowVector () const override { return bm.CreateColVector(); }
     virtual AutoVector CreateColVector () const override { return bm.CreateRowVector(); }
 
@@ -338,7 +346,7 @@ namespace ngla
   /**
      The conjugate transpose of a BaseMatrix.
   */
-  class ConjTrans : public BaseMatrix
+  class NGS_DLL_HEADER ConjTrans : public BaseMatrix
   {
     shared_ptr<BaseMatrix> spbm;
   public:
@@ -399,7 +407,7 @@ namespace ngla
   /* ************************** Product ************************* */
 
   /// action of product of two matrices 
-  class ProductMatrix : public BaseMatrix
+  class NGS_DLL_HEADER ProductMatrix : public BaseMatrix
   {
     const BaseMatrix & bma;
     const BaseMatrix & bmb;
@@ -426,6 +434,7 @@ namespace ngla
     }
     ///
     virtual bool IsComplex() const override { return bma.IsComplex() || bmb.IsComplex(); }
+    virtual BaseMatrix::OperatorInfo GetOperatorInfo () const override;
 
     virtual AutoVector CreateRowVector () const override { return bmb.CreateRowVector(); }
     virtual AutoVector CreateColVector () const override { return bma.CreateColVector(); }
@@ -489,7 +498,7 @@ namespace ngla
   /* ************************** Sum ************************* */
 
   /// action of product of two matrices 
-  class SumMatrix : public BaseMatrix
+  class NGS_DLL_HEADER SumMatrix : public BaseMatrix
   {
     const BaseMatrix & bma;
     const BaseMatrix & bmb;
@@ -509,13 +518,15 @@ namespace ngla
     ///
     virtual bool IsComplex() const override { return bma.IsComplex() || bmb.IsComplex(); }
 
+    virtual BaseMatrix::OperatorInfo GetOperatorInfo () const override;
+
     virtual AutoVector CreateRowVector () const override
     {
       try
         {
           return bma.CreateRowVector();
         }
-      catch (Exception e)
+      catch (Exception & e)
         {
           return bmb.CreateRowVector();          
         }
@@ -526,7 +537,7 @@ namespace ngla
         {
           return bma.CreateColVector();
         }
-      catch (Exception e)
+      catch (Exception & e)
         {
           return bmb.CreateColVector();          
         }
@@ -587,8 +598,29 @@ namespace ngla
       bmb.MultTransAdd (b*s, x, y);
     }  
 
-    virtual int VHeight() const override { return bma.VHeight(); }
-    virtual int VWidth() const override { return bma.VWidth(); }
+    virtual int VHeight() const override
+    {
+      try
+        {
+          return bma.VHeight();
+        }
+      catch (Exception &)
+        {
+          return bmb.VHeight();
+        }
+    }
+    
+    virtual int VWidth() const override
+    {
+      try
+        {
+          return bma.VWidth();
+        }
+      catch (Exception &)
+        {
+          return bmb.VWidth();
+        }
+    }
 
     virtual ostream & Print (ostream & ost) const override
     {
@@ -663,7 +695,7 @@ namespace ngla
 
   /* ************************** Identity ************************* */
   
-  class IdentityMatrix : public BaseMatrix
+  class NGS_DLL_HEADER IdentityMatrix : public BaseMatrix
   {
     bool has_format;
     size_t size;
@@ -676,6 +708,8 @@ namespace ngla
       : has_format(true), size(asize), is_complex(ais_complex) { ; }
     
     virtual bool IsComplex() const override { return is_complex; }
+    virtual BaseMatrix::OperatorInfo GetOperatorInfo () const override;
+    
     ///
     virtual void Mult (const BaseVector & x, BaseVector & y) const override
     {
@@ -746,6 +780,15 @@ namespace ngla
   
   /* *********************** operator<< ********************** */
 
+  // default is ProductMatrix, but optimizations for
+  // ParallelMatrices
+  // Embedding Matrices
+  // ....
+  shared_ptr<BaseMatrix> ComposeOperators (shared_ptr<BaseMatrix> a,
+                                           shared_ptr<BaseMatrix> b);
+
+  shared_ptr<BaseMatrix> TransposeOperator (shared_ptr<BaseMatrix> mat);
+  
   /// output operator for matrices
   inline ostream & operator<< (ostream & ost, const BaseMatrix & m)
   {

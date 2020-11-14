@@ -108,23 +108,24 @@ namespace ngla
   {
     size_t height;
     IntRange range;
+    bool is_complex;
   public:
-    Embedding (size_t aheight, IntRange arange)
-      : height(aheight), range(arange) { ; }
+    Embedding (size_t aheight, IntRange arange, bool ais_complex = false)
+      : height(aheight), range(arange), is_complex(ais_complex) { ; }
 
-    virtual bool IsComplex() const override { return false; } 
+    virtual bool IsComplex() const override { return is_complex; } 
 
     virtual int VHeight() const override { return height; }
     virtual int VWidth() const override { return range.Size(); }
 
     virtual AutoVector CreateRowVector () const override
     {
-      return CreateBaseVector(range.Size(), false, 1);
+      return CreateBaseVector(range.Size(), is_complex, 1);
     }
     
     virtual AutoVector CreateColVector () const override
     {
-      return CreateBaseVector(height, false, 1);
+      return CreateBaseVector(height, is_complex, 1);
     }
 
     auto GetRange() const { return range; }
@@ -152,16 +153,16 @@ namespace ngla
     virtual int VHeight() const override { return height; }
     virtual int VWidth() const override { return mat->VWidth(); }
 
+    virtual BaseMatrix::OperatorInfo GetOperatorInfo () const override;
+
     virtual AutoVector CreateRowVector () const override
     {
-      // return CreateBaseVector(range.Size(), false, 1);
       return mat->CreateRowVector();      
     }
     
     virtual AutoVector CreateColVector () const override
     {
-      // return mat->CreateColVector();
-      return CreateBaseVector(height, false, 1);      
+      return CreateBaseVector(height, IsComplex(), 1);      
     }
 
     virtual void Mult (const BaseVector & x, BaseVector & y) const override;
@@ -176,21 +177,24 @@ namespace ngla
   {
     size_t width;
     IntRange range;
+    bool is_complex;
   public:
-    EmbeddingTranspose (size_t awidth, IntRange arange)
-      : width(awidth), range(arange) { ; }
+    EmbeddingTranspose (size_t awidth, IntRange arange, bool ais_complex = false)
+      : width(awidth), range(arange), is_complex(ais_complex) { ; }
 
+    virtual bool IsComplex() const override { return is_complex; } 
+    
     virtual int VHeight() const override { return range.Size(); }
     virtual int VWidth() const override { return width; }
 
     virtual AutoVector CreateRowVector () const override
     {
-      return CreateBaseVector(width, false, 1);
+      return CreateBaseVector(width, is_complex, 1);
     }
     
     virtual AutoVector CreateColVector () const override
     {
-      return CreateBaseVector(range.Size(), false, 1);
+      return CreateBaseVector(range.Size(), is_complex, 1);
     }
 
     auto GetRange() const { return range; }
@@ -214,12 +218,14 @@ namespace ngla
 
     virtual bool IsComplex() const override { return mat->IsComplex(); } 
 
+    virtual BaseMatrix::OperatorInfo GetOperatorInfo () const override;
+    
     virtual int VHeight() const override { return mat->Height(); }
     virtual int VWidth() const override { return width; }
 
     virtual AutoVector CreateRowVector () const override
     {
-      return CreateBaseVector(width, false, 1);
+      return CreateBaseVector(width, mat->IsComplex(), 1);
     }
     
     virtual AutoVector CreateColVector () const override
@@ -241,12 +247,12 @@ namespace ngla
   template <class TVR, class TVC>
   class Real2ComplexMatrix : public BaseMatrix
   {
-    const BaseMatrix * realmatrix;
+    shared_ptr<BaseMatrix> realmatrix;
     VVector<TVR> hx, hy;
   public:
-    NGS_DLL_HEADER Real2ComplexMatrix (const BaseMatrix * arealmatrix = 0);
+    NGS_DLL_HEADER Real2ComplexMatrix (shared_ptr<BaseMatrix> arealmatrix = nullptr);
     bool IsComplex() const override { return true; }     
-    void SetMatrix (const BaseMatrix * arealmatrix);
+    void SetMatrix (shared_ptr<BaseMatrix> arealmatrix);
     const BaseMatrix & GetMatrix () const { return *realmatrix; }
     void MultAdd (double s, const BaseVector & x, BaseVector & y) const override;
     void MultAdd (Complex s, const BaseVector & x, BaseVector & y) const override;
@@ -332,6 +338,76 @@ namespace ngla
     virtual AutoVector CreateRowVector () const override;
     virtual AutoVector CreateColVector () const override;
   };
+
+
+
+
+  class LoggingMatrix : public BaseMatrix
+  {
+    shared_ptr<BaseMatrix> mat;
+    string label;
+    unique_ptr<ostream> out;
+    optional<NgMPI_Comm> comm;
+  public:
+    LoggingMatrix (shared_ptr<BaseMatrix> amat, string alabel, string filename,
+                   optional<NgMPI_Comm> acomm);
+    ~LoggingMatrix ();
+    int VHeight() const override { return mat->VHeight(); }
+    int VWidth() const override { return mat->VWidth(); }
+    bool IsComplex() const override { return mat->IsComplex(); }
+    
+    BaseVector & AsVector() override;
+    const BaseVector & AsVector() const override;
+    void SetZero() override;
+
+    ostream & Print (ostream & ost) const override { return mat->Print(ost); }
+    Array<MemoryUsage> GetMemoryUsage () const override { return mat->GetMemoryUsage(); }
+    size_t NZE () const override { return mat->NZE(); }
+
+    void Update() override { mat->Update(); }
+    shared_ptr<BaseMatrix> CreateMatrix () const override { return mat->CreateMatrix(); }
+    AutoVector CreateRowVector () const override;
+    AutoVector CreateColVector () const override;
+
+    void Mult (const BaseVector & x, BaseVector & y) const override;
+    void MultTrans (const BaseVector & x, BaseVector & y) const override;
+    void MultAdd (double s, const BaseVector & x, BaseVector & y) const override;
+    void MultAdd (Complex s, const BaseVector & x, BaseVector & y) const override;
+    void MultTransAdd (double s, const BaseVector & x, BaseVector & y) const override;
+    void MultTransAdd (Complex s, const BaseVector & x, BaseVector & y) const override;
+    void MultConjTransAdd (Complex s, const BaseVector & x, BaseVector & y) const override;
+    void MultAdd (FlatVector<double> alpha, const MultiVector & x, MultiVector & y) const override;
+    
+    void MultAdd1 (double s, const BaseVector & x, BaseVector & y,
+                   const BitArray * ainner = NULL,
+                   const Array<int> * acluster = NULL) const override
+    { mat->MultAdd1 (s, x, y, ainner, acluster); }
+    
+    void MultAdd2 (double s, const BaseVector & x, BaseVector & y,
+                   const BitArray * ainner = NULL,
+                   const Array<int> * acluster = NULL) const override
+    { mat->MultAdd2 (s, x, y, ainner, acluster); }
+
+    shared_ptr<BaseMatrix> InverseMatrix (shared_ptr<BitArray> subset = nullptr) const override
+    { return mat->InverseMatrix(subset); }
+    
+    shared_ptr<BaseMatrix> InverseMatrix (shared_ptr<const Array<int>> clusters) const override
+    { return mat->InverseMatrix(clusters); }
+    
+    INVERSETYPE SetInverseType ( INVERSETYPE ainversetype ) const override
+    { return mat->SetInverseType(ainversetype); }
+    INVERSETYPE SetInverseType ( string ainversetype ) const override
+    { return mat->SetInverseType(ainversetype); }
+    INVERSETYPE  GetInverseType () const override
+    { return mat->GetInverseType(); }
+    void DoArchive (Archive & ar) override
+    { mat->DoArchive(ar); }
+  };
+  
+
+
+
+  
 }
 
 

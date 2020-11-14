@@ -624,7 +624,7 @@ namespace ngfem
 
     INLINE THDiv2DivShape (const Class_curl_uDvw_minus_Duvw<3,SCAL> & uvw) 
     { 
-      data = 0.0;
+      data = SCAL(0.0);
     }
 
     INLINE operator SCAL () const { return data; }
@@ -730,6 +730,9 @@ namespace ngfem
     virtual void CalcMappedShape (const SIMD_BaseMappedIntegrationRule & mir, 
                                   BareSliceMatrix<SIMD<double>> shapes) const override;
 
+    virtual void CalcMappedNormalShape (const SIMD_BaseMappedIntegrationRule & mir, 
+                                        BareSliceMatrix<SIMD<double>> shapes) const override;
+    
     using HDivFiniteElement<ET_trait<ET>::DIM>::CalcMappedDivShape;
     virtual void CalcMappedDivShape (const SIMD_BaseMappedIntegrationRule & mir, 
                                      BareSliceMatrix<SIMD<double>> divshapes) const override;

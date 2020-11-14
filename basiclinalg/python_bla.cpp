@@ -11,7 +11,7 @@ void PyDefVecBuffer( TCLASS & c )
     typedef typename T::TSCAL TSCAL;
     c.def_buffer([](T &self) -> py::buffer_info {
         return py::buffer_info(
-            &self(0),                                     /* Pointer to buffer */
+            self.Data(),                                     /* Pointer to buffer */
             sizeof(TSCAL),                                /* Size of one scalar */
             py::format_descriptor<TSCAL>::format(),       /* Python struct-style format descriptor */
             1,                                            /* Number of dimensions */
@@ -33,7 +33,7 @@ void PyDefMatBuffer( TCLASS & c )
     typedef typename T::TSCAL TSCAL;
     c.def_buffer([](T &self) -> py::buffer_info {
         return py::buffer_info(
-            &self(0),                                     /* Pointer to buffer */
+            self.Data(),                                     /* Pointer to buffer */
             sizeof(TSCAL),                                /* Size of one scalar */
             py::format_descriptor<TSCAL>::format(),       /* Python struct-style format descriptor */
             2,                                            /* Number of dimensions */
@@ -81,12 +81,26 @@ void PyVecAccess( py::module &m, TCLASS &c )
             for (int i=0; i<n; i++, start+=step)
                 self[start] = val;
           }, py::arg("inds"), py::arg("value"), "Set value at given positions" );
+        // c.def("__setitem__", [](T &self, py::slice inds, const std::vector<TSCAL> & vec ) {
+        c.def("__setitem__", [](T &self, py::slice inds, py::array_t<TSCAL> bvec ) {
+            auto vec = bvec. template unchecked<1>();
+            size_t start, step, n;
+            InitSlice( inds, self.Size(), start, step, n );
+            for (int i=0; i<n; i++, start+=step)
+              self[start] = vec(i);
+          }, py::arg("inds"), py::arg("value"), "Set value at given positions" );
         c.def("__add__" , [](T &self, T &v) { return TNEW(self+v); }, py::arg("vec") );
         c.def("__sub__" , [](T &self, T &v) { return TNEW(self-v); }, py::arg("vec") );
         c.def("__mul__" , [](T &self, TSCAL s) { return TNEW(s*self); }, py::arg("value") );
         c.def("__rmul__" , [](T &self, TSCAL s) { return TNEW(s*self); }, py::arg("value") );
         c.def("__neg__" , [](T &self) { return TNEW(-self); });        
-        c.def("InnerProduct",  [](T & x, T & y) { return InnerProduct (x, y); }, py::arg("y"), "Returns InnerProduct with other object");
+        c.def("InnerProduct",  [](T & x, T & y, bool conjugate)
+              {
+                if (conjugate)
+                  return InnerProduct (x, Conj(y));
+                else
+                  return InnerProduct (x, y);
+              }, py::arg("y"), py::arg("conjugate")=true, "Returns InnerProduct with other object");
         c.def("Norm",  [](T & x) { return L2Norm(x); }, "Returns L2-norm");
 }
 

@@ -186,6 +186,14 @@ cl_UnaryOpCF<GenericIdentity>::Diff(const CoefficientFunction * var,
   return hcf;
 }
 
+template <>
+shared_ptr<CoefficientFunction>
+cl_UnaryOpCF<GenericIdentity>::Operator(const string & name) const
+{
+  return c1->Operator(name);
+}
+
+
 struct GenericSin {
   template <typename T> T operator() (T x) const { return sin(x); }
   static string Name() { return "sin"; }
@@ -316,7 +324,8 @@ cl_UnaryOpCF<GenericSin>::Diff(const CoefficientFunction * var,
                                  shared_ptr<CoefficientFunction> dir) const
 {
   if (this == var) return dir;
-  return UnaryOpCF(c1, GenericCos(), "cos") * c1->Diff(var, dir);
+  // return UnaryOpCF(c1, GenericCos(), "cos") * c1->Diff(var, dir);
+  return CWMult (UnaryOpCF(c1, GenericCos(), "cos"), c1->Diff(var, dir));
 }
 
 template <> shared_ptr<CoefficientFunction>
@@ -324,7 +333,8 @@ cl_UnaryOpCF<GenericCos>::Diff(const CoefficientFunction * var,
                                  shared_ptr<CoefficientFunction> dir) const
 {
   if (this == var) return dir;
-  return -1 * UnaryOpCF(c1, GenericSin(), "sin") * c1->Diff(var, dir);
+  // return -1 * UnaryOpCF(c1, GenericSin(), "sin") * c1->Diff(var, dir);
+  return CWMult (-1 * UnaryOpCF(c1, GenericSin(), "sin"),  c1->Diff(var, dir));
 }
 
 template <> shared_ptr<CoefficientFunction>
@@ -340,7 +350,8 @@ cl_UnaryOpCF<GenericSinh>::Diff(const CoefficientFunction * var,
                                  shared_ptr<CoefficientFunction> dir) const
 {
   if (this == var) return dir;
-  return UnaryOpCF(c1, GenericCosh(), "cosh") * c1->Diff(var, dir);
+  // return UnaryOpCF(c1, GenericCosh(), "cosh") * c1->Diff(var, dir);
+  return CWMult (UnaryOpCF(c1, GenericCosh(), "cosh"), c1->Diff(var, dir));
 }
 
 template <> shared_ptr<CoefficientFunction>
@@ -348,20 +359,22 @@ cl_UnaryOpCF<GenericCosh>::Diff(const CoefficientFunction * var,
                                  shared_ptr<CoefficientFunction> dir) const
 {
   if (this == var) return dir;
-  return UnaryOpCF(c1, GenericSinh(), "sinh") * c1->Diff(var, dir);
+  // return UnaryOpCF(c1, GenericSinh(), "sinh") * c1->Diff(var, dir);
+  return CWMult (UnaryOpCF(c1, GenericSinh(), "sinh"), c1->Diff(var, dir));
 }
 
 template <> shared_ptr<CoefficientFunction>
 cl_UnaryOpCF<GenericExp>::Diff(const CoefficientFunction * var,
-                                 shared_ptr<CoefficientFunction> dir) const
+                               shared_ptr<CoefficientFunction> dir) const
 {
   if (this == var) return dir;
-  return UnaryOpCF(c1, GenericExp(), "exp") * c1->Diff(var, dir);
+  // return UnaryOpCF(c1, GenericExp(), "exp") * c1->Diff(var, dir);
+  return CWMult (UnaryOpCF(c1, GenericExp(), "exp"), c1->Diff(var, dir));
 }
 
 template <> shared_ptr<CoefficientFunction>
 cl_UnaryOpCF<GenericLog>::Diff(const CoefficientFunction * var,
-                                 shared_ptr<CoefficientFunction> dir) const
+                               shared_ptr<CoefficientFunction> dir) const
 {
   if (this == var) return dir;
   return c1->Diff(var, dir) / c1;
@@ -615,50 +628,16 @@ direction : int
     shared_ptr<CF> GetTangentialVectorCF (int dim)
     {
       return TangentialVectorCF(dim);
-      /*
-      switch(dim)
-	{
-	case 1:
-	  return make_shared<TangentialVectorCF<1>>();
-	case 2:
-	  return make_shared<TangentialVectorCF<2>>();
-	default:
-	  return make_shared<TangentialVectorCF<3>>();
-	}
-      */
     }
 
-    shared_ptr<CF> GetJacobianMatrixCF (int dim)
+    shared_ptr<CF> GetJacobianMatrixCF (int dims, int dimr)
     {
-      return JacobianMatrixCF(dim);
-      /*
-      switch(dim)
-	{
-	case 1:
-	  return make_shared<JacobianMatrixCF<1>>();
-	case 2:
-	  return make_shared<JacobianMatrixCF<2>>();
-	default:
-	  return make_shared<JacobianMatrixCF<3>>();
-	}
-      */
+      return JacobianMatrixCF(dims,dimr);
     }
 
     shared_ptr<CF> GetWeingartenCF (int dim)
     {
       return WeingartenCF(dim);
-      /*
-      switch(dim)
-	{
-        case 1:
-          throw Exception ("no WeingartenCF in 1D");
-	  // return make_shared<WeingartenCF<1>>();
-	case 2:
-	  return make_shared<WeingartenCF<2>>();
-	default:
-	  return make_shared<WeingartenCF<3>>();
-	}
-      */
     }
   };
 
@@ -693,9 +672,22 @@ direction : int
     .def("tangential", &SpecialCoefficientFunctions::GetTangentialVectorCF, py::arg("dim"),
          "depending on contents: tangential-vector to element\n"
          "space-dimension must be provided")
-    .def("JacobianMatrix", &SpecialCoefficientFunctions::GetJacobianMatrixCF, py::arg("dim"),
+    .def("JacobianMatrix", [] (SpecialCoefficientFunctions& self, int dim)
+	  {
+            return self.GetJacobianMatrixCF(dim,dim);
+	  },
+         py::arg("dim"),
          "Jacobian matrix of transformation to physical element\n"
          "space-dimension must be provided")
+    .def("JacobianMatrix", [] (SpecialCoefficientFunctions& self, int dimr, int dims)
+	  {
+            if (dimr < dims)
+              throw Exception("In SpecialCoefficientFunctions::GetJacobianMatrixCF: dimr > dims");
+            return self.GetJacobianMatrixCF(dims,dimr);
+	  },
+         py::arg("dimr"), py::arg("dims"),
+         "Jacobian matrix of transformation to physical element\n"
+         "space-dimensions dimr >= dims must be provided")
     .def("Weingarten", &SpecialCoefficientFunctions::GetWeingartenCF, py::arg("dim"),
          "Weingarten tensor \n"
          "space-dimension must be provided")
@@ -761,12 +753,29 @@ val : can be one of the following:
 
     .def("__call__", [] (CF& self, BaseMappedIntegrationPoint & mip) -> py::object
 	  {
+            auto Eval = [&] (auto vec) -> py::object
+              {
+                self.Evaluate (mip, vec);
+                if (self.Dimensions().Size() == 0)
+                  return py::cast(vec(0));
+                py::tuple res(self.Dimension());
+                for (auto i : Range(vec))
+                  res[i] = py::cast(vec[i]);
+                return std::move(res);
+              };
+
+	    if (!self.IsComplex())
+              return Eval(Vector<> (self.Dimension()));
+            else
+              return Eval(Vector<Complex> (self.Dimension()));
+            
+            /*
 	    if (!self.IsComplex())
 	      {
-                if (self.Dimension() == 1)
-                  return py::cast(self.Evaluate(mip));
                 Vector<> vec(self.Dimension());
                 self.Evaluate (mip, vec);
+                if (self.Dimensions().Size() == 0)
+                  return py::cast(vec(0));
                 py::tuple res(self.Dimension());
                 for (auto i : Range(vec))
                   res[i] = py::cast(vec[i]);
@@ -776,15 +785,28 @@ val : can be one of the following:
 	      {
                 Vector<Complex> vec(self.Dimension());
                 self.Evaluate (mip, vec);
-                if (vec.Size()==1) return py::cast(vec(0));
+                if (vec.Dimensions().Size()==0)
+                  return py::cast(vec(0));
                 py::tuple res(self.Dimension());
                 for (auto i : Range(vec))
                   res[i] = py::cast(vec[i]);
                 return std::move(res);
 	      }
+            */
 	  },
          py::arg("mip"),
          "evaluate CF at a mapped integrationpoint mip. mip can be generated by calling mesh(x,y,z)")
+    .def("__call__", [](shared_ptr<CF> self, double x, optional<double> y, optional<double> z)
+         {
+           Vector<> pnt;
+           if (y && z)
+             pnt = Vector<>{ x, y.value_or(0), z.value_or(0) };
+           else if (y)
+             pnt = Vector<>{ x, y.value_or(0) };
+           else
+             pnt = Vector<>{ x };
+           return make_shared<PointEvaluationFunctional>(self, pnt);
+         }, py::arg("x"), py::arg("y")=nullopt, py::arg("z")=nullopt)
     .def_property_readonly("dim",
          [] (CF& self) { return self.Dimension(); } ,
                   "number of components of CF")
@@ -796,6 +818,10 @@ val : can be one of the following:
     .def_property_readonly("is_complex",
                            [] (CF &  self) { return self.IsComplex(); },
                            "is CoefficientFunction complex-valued ?")
+    
+    .def_property("spacedim",
+                  [] (CF & self) { return self.SpaceDim(); },
+                  [] (CF & self, int dim) { self.SetSpaceDim(dim); })
     
     .def("__getitem__",  [](shared_ptr<CF> self, int comp)
                                          {
@@ -895,7 +921,9 @@ cf : ngsolve.CoefficientFunction
     
     .def ("Other", MakeOtherCoefficientFunction,
           "Evaluate on other element, as needed for DG jumps")
-
+    .def ("Operator", [](shared_ptr<CF> coef, string name) {
+        return coef->Operator(name);
+      })
     .def ("Derive",
           // &CoefficientFunction::Diff,
           [] (shared_ptr<CF> coef, shared_ptr<CF> var, shared_ptr<CF> dir)
@@ -1060,7 +1088,7 @@ wait : bool
   py::implicitly_convertible<py::list, CoefficientFunction>();
 
   
-  
+  py::class_<PointEvaluationFunctional, shared_ptr<PointEvaluationFunctional>> (m, "PointEvaluationFunctional");
 
   
   if(have_numpy)
@@ -1235,7 +1263,12 @@ vals : list
           }), py::arg("order"), py::arg("knots"), py::arg("vals"),
         "B-Spline of a certain order, provide knot and value vectors")
     .def("__str__", &ToString<BSpline>)
-    .def("__call__", &BSpline::Evaluate)
+    .def("__call__", [] (shared_ptr<BSpline> self, double pt)
+          {
+            return self->Evaluate(pt);
+          },
+      py::arg("pt"),
+      py::return_value_policy::move)
     .def("__call__", [](shared_ptr<BSpline> sp, shared_ptr<CF> coef)
           {
             return UnaryOpCF (coef, GenericBSpline(sp) /* , GenericBSpline(sp) */);
@@ -1785,7 +1818,6 @@ weights : list
     .def_property_readonly("curved", &ElementTransformation::IsCurvedElement, "Is mapping non-affine ?")    
     .def ("__call__", [] (shared_ptr<ElementTransformation> self, double x, double y, double z)
            {
-             
              return &(*self)(IntegrationPoint(x,y,z), global_alloc);
            },
           py::arg("x"), py::arg("y")=0, py::arg("z")=0,

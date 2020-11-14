@@ -32,50 +32,12 @@ namespace ngcomp
                        LocalHeap & lh);
   
 
-  // shall move to fespace.hpp, but keep compilation time low douring testing ...
-  template <typename BASESPACE>
-  class VectorFESpace : public CompoundFESpace
-  {
-  public:
-    VectorFESpace (shared_ptr<MeshAccess> ama, const Flags & flags, 
-                   bool checkflags = false)
-      : CompoundFESpace (ama, flags)
-    {
-      Array<string> dirichlet_comp;
-      string dirnames[] = { "dirichletx", "dirichlety", "dirichletz" };
-      for (int i = 0; i <  ma->GetDimension(); i++)
-        {
-          Flags tmpflags = flags;
-          if (flags.StringFlagDefined(dirnames[i]))
-            tmpflags.SetFlag ("dirichlet", flags.GetStringFlag(dirnames[i]));
-          if (flags.StringFlagDefined(dirnames[i]+"_bbnd"))
-            tmpflags.SetFlag ("dirichlet_bbnd", flags.GetStringFlag(dirnames[i]+"_bbnd"));
-          AddSpace (make_shared<BASESPACE> (ama, tmpflags));
-        }
 
-      for (auto vb : { VOL, BND, BBND, BBBND })
-        {
-          if (auto eval = spaces[0] -> GetEvaluator(vb))
-            evaluator[vb] = make_shared<VectorDifferentialOperator> (eval, ma->GetDimension());
-          if (auto fluxeval = spaces[0] -> GetFluxEvaluator(vb))
-            flux_evaluator[vb] = make_shared<VectorDifferentialOperator> (fluxeval, ma->GetDimension());
-        }
 
-      auto additional = spaces[0]->GetAdditionalEvaluators();
-      for (int i = 0; i < additional.Size(); i++)
-        additional_evaluators.Set (additional.GetName(i),
-                                   make_shared<VectorDifferentialOperator>(additional[i], ma->GetDimension()));
 
-      type = "Vector"+(*this)[0]->type;
-    }
 
-    virtual string GetClassName () const override
-    {
-      return "Vector"+ (*this)[0]->GetClassName();
-    }
-    
-  };
 
+  
 }
 
 
@@ -104,79 +66,22 @@ public:
 };
 
 
-py::object MakeProxyFunction2 (shared_ptr<FESpace> fes,
-                               bool testfunction,
-                               const function<shared_ptr<ProxyFunction>(shared_ptr<ProxyFunction>)> & addblock)
+
+py::object ProxyNode2Py (const ProxyNode & node)
 {
-  if (auto periodicspace = dynamic_pointer_cast<PeriodicFESpace>(fes))
-    return MakeProxyFunction2 (periodicspace->GetBaseSpace(), testfunction, addblock);
-  if (auto compressedspace = dynamic_pointer_cast<CompressedFESpace>(fes))
-    return MakeProxyFunction2 (compressedspace->GetBaseSpace(), testfunction, addblock);
-  if (auto reorderedspace = dynamic_pointer_cast<ReorderedFESpace>(fes))
-    return MakeProxyFunction2 (reorderedspace->GetBaseSpace(), testfunction, addblock);
+  if (auto proxy = *node)
+    return py::cast(proxy);
   
-  auto compspace = dynamic_pointer_cast<CompoundFESpace> (fes);
-  if (compspace && !fes->GetEvaluator())
-    {
-      py::list l;
-      int nspace = compspace->GetNSpaces();
-      for (int i = 0; i < nspace; i++)
-        {
-          l.append (MakeProxyFunction2 ((*compspace)[i], testfunction,
-                                         [&] (shared_ptr<ProxyFunction> proxy)
-                                         {
-                                           auto block_eval = make_shared<CompoundDifferentialOperator> (proxy->Evaluator(), i);
-                                           shared_ptr <CompoundDifferentialOperator> block_deriv_eval = nullptr;
-                                           if (proxy->DerivEvaluator() != nullptr)
-                                             block_deriv_eval = make_shared<CompoundDifferentialOperator> (proxy->DerivEvaluator(), i);
-                                           shared_ptr <CompoundDifferentialOperator> block_trace_eval = nullptr;
-                                           if (proxy->TraceEvaluator() != nullptr)
-                                             block_trace_eval = make_shared<CompoundDifferentialOperator> (proxy->TraceEvaluator(), i);
-					   shared_ptr <CompoundDifferentialOperator> block_ttrace_eval = nullptr;
-					   if (proxy->TTraceEvaluator() != nullptr)
-					     block_ttrace_eval = make_shared<CompoundDifferentialOperator> (proxy->TTraceEvaluator(),i);
-                                           shared_ptr <CompoundDifferentialOperator> block_trace_deriv_eval = nullptr;
-                                           if (proxy->TraceDerivEvaluator() != nullptr)
-                                             block_trace_deriv_eval = make_shared<CompoundDifferentialOperator> (proxy->TraceDerivEvaluator(), i);
-					   shared_ptr <CompoundDifferentialOperator> block_ttrace_deriv_eval = nullptr;
-					   if (proxy->TTraceDerivEvaluator() != nullptr)
-					     block_ttrace_deriv_eval = make_shared<CompoundDifferentialOperator> (proxy->TTraceDerivEvaluator(),i);
-                                           auto block_proxy = make_shared<ProxyFunction> (fes, testfunction, fes->IsComplex(),                                                                                          block_eval, block_deriv_eval, block_trace_eval, block_trace_deriv_eval,
-					  block_ttrace_eval, block_ttrace_deriv_eval);
-
-                                           SymbolTable<shared_ptr<DifferentialOperator>> add = proxy->GetAdditionalEvaluators();
-                                           for (int j = 0; j < add.Size(); j++)
-                                             block_proxy->SetAdditionalEvaluator(add.GetName(j),
-                                                                                 make_shared<CompoundDifferentialOperator> (add[j], i));
-                                           
-                                           block_proxy = addblock(block_proxy);
-                                           return block_proxy;
-                                         }));
-        }
-      return std::move(l);
-    }
-
-  auto proxy = make_shared<ProxyFunction>  (fes, testfunction, fes->IsComplex(),
-                                            fes->GetEvaluator(),
-                                            fes->GetFluxEvaluator(),
-                                            fes->GetEvaluator(BND),
-                                            fes->GetFluxEvaluator(BND),
-					    fes->GetEvaluator(BBND),
-					    fes->GetFluxEvaluator(BBND));
-  auto add_diffops = fes->GetAdditionalEvaluators();
-  for (int i = 0; i < add_diffops.Size(); i++)
-    proxy->SetAdditionalEvaluator (add_diffops.GetName(i), add_diffops[i]);
-
-  proxy = addblock(proxy);
-  return py::cast(proxy);
+  py::list l;
+  for (auto & sub : node.list)
+    l.append (ProxyNode2Py(sub));
+  return py::object(l);
 }
 
 py::object MakeProxyFunction (shared_ptr<FESpace> fes,
                               bool testfunction) 
 {
-  return 
-    MakeProxyFunction2 (fes, testfunction, 
-                        [&] (shared_ptr<ProxyFunction> proxy) { return proxy; });
+  return ProxyNode2Py(fes->GetProxyFunction(testfunction));
 }
 
 
@@ -236,8 +141,6 @@ void NGS_DLL_HEADER ExportNgcomp(py::module &m)
 
   static size_t global_heapsize = 10000000;
   static LocalHeap glh(global_heapsize, "python-comp lh", true);
-
-  
 
   //////////////////////////////////////////////////////////////////////////////////////////
 
@@ -727,6 +630,28 @@ kwargs : kwargs
            self->FinalizeUpdate(); //Update FreeDofs
          }, py::arg("component")=DummyArgument(), 
          "set all visible coupling types to HIDDEN_DOFs (will be overwritten by any Update())")
+
+    .def_property_readonly("components", 
+                  [](shared_ptr<FESpace> self)-> py::tuple
+                   { 
+                     if (auto compspace = dynamic_pointer_cast<CompoundFESpace>(self))
+                       {
+                         py::tuple vecs(compspace->GetNSpaces());
+                         for (int i = 0; i < compspace -> GetNSpaces(); i++) 
+                           vecs[i]= py::cast((*compspace)[i]);
+                         return vecs;
+                       }
+                     throw Exception("components only available for ProductSpace");                     
+                   }, "deprecated, will be only available for ProductSpace")
+    .def("Range",
+         [] (shared_ptr<FESpace> self, int comp)
+         {
+           if (auto compspace = dynamic_pointer_cast<CompoundFESpace>(self))
+             return compspace->GetRange(comp);
+           throw Exception("Range only available for ProductSpace");
+         }, "deprecated, will be only available for ProductSpace")
+
+    
     .def_property_readonly ("ndof", [](shared_ptr<FESpace> self) { return self->GetNDof(); },
                             "number of degrees of freedom")
 
@@ -968,37 +893,6 @@ coupling : bool
          { return self->GetProlongation(); },
          "Return prolongation operator for use in multi-grid")
 
-    .def("Range",
-         [] (shared_ptr<FESpace> self, int comp)
-         {
-           auto compspace = dynamic_pointer_cast<CompoundFESpace> (self);
-           if (!compspace)
-             throw py::type_error("'Range' is available only for product spaces");
-           return compspace->GetRange(comp);
-         },
-         py::arg("component"), docu_string(R"raw_string(
-         Return interval of dofs of a component of a product space.
-
-Parameters:
-
-component : int
-  input component
-
-)raw_string"))
-    
-    .def_property_readonly("components", 
-                  [](shared_ptr<FESpace> self)-> py::tuple
-                   { 
-                     auto compspace = dynamic_pointer_cast<CompoundFESpace> (self);
-                     if (!compspace)
-                       throw py::type_error("'components' is available only for product spaces");
-                     py::tuple vecs(compspace->GetNSpaces());
-                     for (int i = 0; i < compspace -> GetNSpaces(); i++) 
-                       vecs[i]= py::cast((*compspace)[i]);
-                     return vecs;
-                   },
-                  "Return a list of the components of a product space")
-
     .def("TrialFunction",
          [] (const shared_ptr<FESpace> self)
          {
@@ -1085,10 +979,77 @@ rho : ngsolve.fem.CoefficientFunction
          {
            return self == other;
          }, py::arg("space"))
+    
+    .def("__mul__", [] (shared_ptr<FESpace> space1, shared_ptr<FESpace> space2) {
+        bool is_complex = space1->IsComplex();
+        if (is_complex != space2->IsComplex())
+          throw Exception("Product space must consist of all real or all complex spaces");
+        int dim = space1->GetDimension();
+        if (dim != space2->GetDimension())
+          throw Exception("Product space needs same dimension for all components");
+        Flags flags;
+        if (is_complex) flags.SetFlag("complex");
+        flags.SetFlag ("dim", dim);
+        auto productspace = make_shared<CompoundFESpace> (space1->GetMeshAccess(), flags);
+
+        for (auto s : { space1, space2 })
+          {
+            const FESpace & fes = *s; // avoid side effect warning
+            if (typeid(fes) == typeid(CompoundFESpace)) // exactly Compound and not more
+              for (auto spc : dynamic_pointer_cast<CompoundFESpace> (s) -> Spaces())
+                productspace->AddSpace(spc);
+            else
+              productspace->AddSpace (s);
+          }
+        productspace->Update();
+        productspace->FinalizeUpdate();
+        return productspace;
+      })
+
+    .def("__pow__", [] (shared_ptr<FESpace> space, int p) {
+        bool is_complex = space->IsComplex();
+        int dim = space->GetDimension();
+        Flags flags;
+        if (is_complex) flags.SetFlag("complex");
+        flags.SetFlag ("dim", dim);
+        auto productspace = make_shared<CompoundFESpaceAllSame> (space, p, flags);
+        productspace->Update();
+        productspace->FinalizeUpdate();
+        return productspace;
+      })
     ;
 
   py::class_<CompoundFESpace, shared_ptr<CompoundFESpace>, FESpace>
-    (m,"CompoundFESpace")
+    (m,"ProductSpace")
+    .def(py::init([] (py::args pyspaces) {
+
+          /*
+          Array<shared_ptr<FESpace>> spaces;
+          for (auto fes : pyspaces )
+            spaces.Append(py::extract<shared_ptr<FESpace>>(fes)());
+          */
+          auto spaces = makeCArray<shared_ptr<FESpace>> (pyspaces);
+            
+          Flags flags;
+          if (spaces.Size() == 0)
+            throw Exception("Product space must have at least one space");
+          int dim = spaces[0]->GetDimension();
+          for (auto space : spaces)
+            if (space->GetDimension() != dim)
+              throw Exception("Product space of spaces with different dimensions is not allowed");
+          flags.SetFlag ("dim", dim);
+          bool is_complex = spaces[0]->IsComplex();
+          for (auto space : spaces)
+            if (space->IsComplex() != is_complex)
+              throw Exception("Product space of spaces with complex and real spaces is not allowed");
+          if (is_complex)
+            flags.SetFlag ("complex");
+
+          auto fes = make_shared<CompoundFESpace> (spaces[0]->GetMeshAccess(), spaces, flags);
+          fes->Update();
+          fes->FinalizeUpdate();
+          return fes;
+        }))
     .def(py::pickle([] (py::object pyfes)
                     {
                       auto fes = py::cast<shared_ptr<CompoundFESpace>>(pyfes);
@@ -1111,6 +1072,61 @@ rho : ngsolve.fem.CoefficientFunction
                       py::cast(fes).attr("__dict__") = state[2];
                       return fes;
                     }))
+
+    .def("Range",
+         [] (shared_ptr<CompoundFESpace> self, int comp)
+         {
+           return self->GetRange(comp);
+         },
+         py::arg("component"), docu_string(R"raw_string(
+         Return interval of dofs of a component of a product space.
+
+Parameters:
+
+component : int
+  input component
+
+)raw_string"))
+
+    .def("Embedding", [] (shared_ptr<CompoundFESpace> self, int comp)
+         {
+           return self->EmbeddingOperator(comp);
+           // return make_shared<Embedding> (self->GetNDof(), self->GetRange(comp), self->IsComplex());
+         },
+         py::arg("component"), "create embedding operator for this component")
+
+    .def("Restriction", [] (shared_ptr<CompoundFESpace> self, int comp)
+         {
+           return self->RestrictionOperator(comp);
+           // return make_shared<Embedding> (self->GetNDof(), self->GetRange(comp), self->IsComplex());
+         },
+         py::arg("component"), "create embedding operator for this component")
+
+    
+    .def_property_readonly("embeddings", 
+                  [](shared_ptr<CompoundFESpace> self)-> py::list
+                   { 
+                     py::list embeddings(self->GetNSpaces());
+                     for (int i = 0; i < self -> GetNSpaces(); i++) 
+                       embeddings[i]= py::cast(make_shared<Embedding> (self->GetNDof(), self->GetRange(i),
+                                                                       self->IsComplex()));
+                     return embeddings;
+                   },
+                  "returns a list of embeddings for the component spaces")
+
+    
+    .def_property_readonly("components", 
+                           [](shared_ptr<CompoundFESpace> self)
+                           {
+                             return Array<shared_ptr<FESpace>>(self->Spaces());
+                           },
+                  "Return a list of the components of a product space")
+
+    
+    ;
+
+  py::class_<CompoundFESpaceAllSame, shared_ptr<CompoundFESpaceAllSame>, CompoundFESpace>
+    (m,"ProductSpaceAllSame")
     ;
 
   
@@ -1134,6 +1150,8 @@ rho : ngsolve.fem.CoefficientFunction
   ExportFESpace<VectorL2FESpace, CompoundFESpace> (m, "VectorL2");
 
   ExportFESpace<L2SurfaceHighOrderFESpace> (m, "SurfaceL2");
+
+  ExportFESpace<TangentialSurfaceL2FESpace> (m, "TangentialSurfaceL2");
 
   ExportFESpace<NumberFESpace> (m, "NumberSpace");
 
@@ -1571,10 +1589,36 @@ active_dofs : BitArray or None
                 })
     .def(py::pickle([] (const GridFunction& gf)
                     {
+                      if (ngcore::parallel_pickling && gf.GetMeshAccess()->GetCommunicator().Size() > 1)
+                        {
+                          ostringstream str; // (ios::binary);
+                          gf.Save(str);
+                          string s = str.str();
+                          VFlatVector<double> vec(str.str().length()/8, (double*)(void*)&s[0]);
+                          shared_ptr<BaseVector> v2 = make_shared<VVector<double>> (vec.Size());
+                          *v2 = vec;
+                          
+                          if (gf.GetMeshAccess()->GetCommunicator().Rank() == 0)
+                            return
+                              py::make_tuple(gf.GetFESpace(),
+                                             gf.GetName(),
+                                             Flags(gf.GetFlags()).SetFlag("parallel"),
+                                             v2);
+                        }
+
+                      py::list state;
+                      state.append (gf.GetFESpace());
+                      state.append (gf.GetName());
+                      state.append (gf.GetFlags());
+                      for (int i = 0; i < gf.GetMultiDim(); i++)
+                        state.append (gf.GetVectorPtr(i));
+                      return py::tuple(state);
+                      /*
                       return py::make_tuple(gf.GetFESpace(),
                                             gf.GetName(),
                                             gf.GetFlags(),
                                             gf.GetVectorPtr());
+                      */
                     },
                     [] (py::tuple state)
                     {
@@ -1582,7 +1626,19 @@ active_dofs : BitArray or None
                                                    state[1].cast<string>(),
                                                    state[2].cast<Flags>());
                       gf->Update();
-                      gf->GetVector() = *py::cast<shared_ptr<BaseVector>>(state[3]);
+                      if (!state[2].cast<Flags>().GetDefineFlag("parallel"))
+                        {
+                          for (int i = 0; i < gf->GetMultiDim(); i++)                          
+                            gf->GetVector(i) = *py::cast<shared_ptr<BaseVector>>(state[3+i]);
+                        }
+                      else
+                        {
+                          auto vec = py::cast<shared_ptr<BaseVector>>(state[3]);
+                          // cout << "unpickle cf, vec = " << *vec << endl;
+                          string str((char*)(void*)vec->FVDouble().Data(), 8*vec->Size());
+                          istringstream in(str);
+                          gf->Load(in);
+                        }
                       return gf;
                     }
                     ))
@@ -1636,7 +1692,7 @@ parallel : bool
 )raw_string"))
     .def("Set", 
          [](shared_ptr<GF> self, spCF cf,
-            VorB vb, py::object definedon, bool dualdiffop, bool use_simd)
+            VorB vb, py::object definedon, bool dualdiffop, bool use_simd, int mdcomp)
          {
            shared_ptr<TPHighOrderFESpace> tpspace = dynamic_pointer_cast<TPHighOrderFESpace>(self->GetFESpace());          
             Region * reg = nullptr;
@@ -1651,15 +1707,16 @@ parallel : bool
               return;
             }            
             if (reg)
-              SetValues (cf, *self, *reg, NULL, glh, dualdiffop, use_simd);
+              SetValues (cf, *self, *reg, NULL, glh, dualdiffop, use_simd, mdcomp);
             else
-              SetValues (cf, *self, vb, NULL, glh, dualdiffop, use_simd);
+              SetValues (cf, *self, vb, NULL, glh, dualdiffop, use_simd, mdcomp);
          },
          py::arg("coefficient"),
          py::arg("VOL_or_BND")=VOL,
          py::arg("definedon")=DummyArgument(),
 	 py::arg("dual")=false,
-         py::arg("use_simd")=true, docu_string(R"raw_string(
+         py::arg("use_simd")=true,
+         py::arg("mdcomp")=0, docu_string(R"raw_string(
 Set values
 
 Parameters:
@@ -1708,10 +1765,15 @@ use_simd : bool
                    },
                   "list of coefficient vectors for multi-dim gridfunction")
 
+    .def("MDComponent", [] (shared_ptr<GF> self, int mdcomp)
+         {
+           return make_shared<GridFunctionCoefficientFunction> (self, mdcomp); 
+         }, py::arg("mdcomp"), "select component of multidim GridFunction")
+    
     .def("Deriv",
          [](shared_ptr<GF> self) -> spCF
           {
-            return self->GetDeriv();
+            return self->Deriv();
           }, "Returns the canonical derivative of the space behind the GridFunction if possible.")
 
     .def("Trace",  [](shared_ptr<GF> self)
@@ -1919,7 +1981,10 @@ diffop : ngsolve.fem.DifferentialOperator
            if (definedon)
              {
                if (auto definedon_region = get_if<Region>(&*definedon); definedon_region)
-                 dx.definedon = definedon_region->Mask();
+                 {
+                   dx.definedon = definedon_region->Mask();
+                   dx.vb = VorB(*definedon_region);
+                 }
                if (auto definedon_string = get_if<string>(&*definedon); definedon_string)
                  dx.definedon = *definedon_string;
              }
@@ -1944,6 +2009,9 @@ diffop : ngsolve.fem.DifferentialOperator
   py::class_<Integral, shared_ptr<Integral>> (m, "Integral")
     .def_property_readonly("coef", [] (shared_ptr<Integral> igl) { return igl->cf; })
     .def_property_readonly("symbol", [] (shared_ptr<Integral> igl) { return igl->dx; })
+    .def("__radd__", [](shared_ptr<Integral> igl, int i) {
+        if (i != 0) throw Exception("can only add integer 0 to Integral (for Python sum(list))");
+        return make_shared<SumOfIntegrals>(igl); })
     ;
      
   py::class_<SumOfIntegrals, shared_ptr<SumOfIntegrals>>(m, "SumOfIntegrals")
@@ -1963,6 +2031,9 @@ diffop : ngsolve.fem.DifferentialOperator
     .def ("Derive", &SumOfIntegrals::Diff, "depricated: use 'Diff' instead")
     .def ("Compile", &SumOfIntegrals::Compile, py::arg("realcompile")=false, py::arg("wait")=false)
     .def("__str__",  [](shared_ptr<SumOfIntegrals> igls) { return ToString(*igls); } )
+    .def("__radd__", [](shared_ptr<SumOfIntegrals> igls, int i) {
+        if (i != 0) throw Exception("can only add integer 0 to SumOfIntegrals (for Python sum(list))");
+        return igls; })
     ;
 
   py::class_<Variation> (m, "Variation")
@@ -2005,6 +2076,28 @@ space : ngsolve.FESpace
          py::arg("trialspace"),
          py::arg("testspace"))
 
+    .def(py::init([bf_class](shared_ptr<SumOfIntegrals> igls, py::kwargs kwargs)
+                  {
+                    auto flags = CreateFlagsFromKwArgs(kwargs, bf_class);
+                    shared_ptr<FESpace> trial_space, test_space;
+                    for (auto igl : *igls)
+                      igl->cf -> TraverseTree ([&] (CoefficientFunction& cf) {
+                          if (auto * proxy = dynamic_cast<ProxyFunction*>(&cf))
+                            {
+                              if (proxy->IsTrialFunction())
+                                trial_space = proxy->GetFESpace();
+                              else
+                                test_space = proxy->GetFESpace();
+                            }
+                        });
+                    auto biform = (trial_space == test_space) ?
+                      CreateBilinearForm (trial_space, "biform_from_py", flags)
+                      :
+                      CreateBilinearForm (trial_space, test_space, "biform_from_py", flags);
+                    py::cast(biform) += py::cast(igls);
+                    return biform;
+                  }))
+    
     .def_static("__flags_doc__", [] ()
                 {
                   return py::dict
@@ -2064,7 +2157,13 @@ integrator : ngsolve.fem.BFI
 
 )raw_string"))
     
-    .def("__iadd__",[](BF& self, shared_ptr<BilinearFormIntegrator> other) -> BilinearForm& { self += other; return self; }, py::arg("other") )
+    .def("Add", [](py::object self, shared_ptr<SumOfIntegrals> sum) 
+         {
+           self += py::cast(sum);
+           return self;
+         })
+
+         .def("__iadd__",[](BF& self, shared_ptr<BilinearFormIntegrator> other) -> BilinearForm& { self += other; return self; }, py::arg("other") )
     .def("__iadd__", [](BF & self, shared_ptr<SumOfIntegrals> sum) -> BilinearForm& 
          {
            for (auto icf : sum->icfs)
@@ -2140,9 +2239,10 @@ integrator : ngsolve.fem.BFI
     .def_property_readonly("loform", [](shared_ptr<BilinearForm> self) 
 			   { return self->GetLowOrderBilinearForm(); })
     
-    .def("Assemble", [](BF & self, bool reallocate)
+    .def("Assemble", [](shared_ptr<BilinearForm> self, bool reallocate)
          {
-           self.ReAssemble(glh,reallocate);
+           self->ReAssemble(glh,reallocate);
+           return self;
          }, py::call_guard<py::gil_scoped_release>(),
          py::arg("reallocate")=false, docu_string(R"raw_string(
 Assemble the bilinear form.
@@ -2157,7 +2257,14 @@ reallocate : bool
     .def_property_readonly("mat", [](shared_ptr<BF> self) -> shared_ptr<BaseMatrix>
                                          {
                                            if (self->NonAssemble())
-                                             return make_shared<BilinearFormApplication> (self, glh);
+                                             {
+                                               auto app = make_shared<BilinearFormApplication> (self, glh);
+                                               if (self->GetTrialSpace()->IsParallel())
+                                                 return make_shared<ParallelMatrix>(app,
+                                                                                    self->GetTrialSpace()->GetParallelDofs(),
+                                                                                    self->GetTestSpace()->GetParallelDofs(), C2D);
+                                               return app;
+                                             }
                                            auto mat = self->GetMatrixPtr();
                                            if (!mat)
                                              throw py::type_error("matrix not ready - assemble bilinearform first");
@@ -2321,6 +2428,29 @@ flags : dict
                     return f;
                   }),
          py::arg("space"))
+
+    .def(py::init([lf_class](shared_ptr<SumOfIntegrals> igls, py::kwargs kwargs)
+                  {
+                    auto flags = CreateFlagsFromKwArgs(kwargs, lf_class);
+                    shared_ptr<FESpace> test_space;
+                    for (auto igl : *igls)
+                      igl->cf -> TraverseTree ([&] (CoefficientFunction& cf) {
+                          if (auto * proxy = dynamic_cast<ProxyFunction*>(&cf))
+                            {
+                              if (proxy->IsTrialFunction())
+                                throw Exception("Linearform should not have TrialFunction");
+                              else
+                                test_space = proxy->GetFESpace();
+                            }
+                        });
+                    auto liform = CreateLinearForm (test_space, "liform_from_py", flags);
+                    py::cast(liform) += py::cast(igls);
+                    liform->AllocateVector();
+                    return liform;
+                  }))
+
+
+    
     .def_static("__flags_doc__", [] ()
                 {
                   return py::dict
@@ -2354,13 +2484,22 @@ integrator : ngsolve.fem.LFI
   input linear form integrator
 
 )raw_string"))
+
+    .def("Add", [](py::object self, shared_ptr<SumOfIntegrals> sum) 
+         {
+           self += py::cast(sum);
+           return self;
+         })
     
     .def("__iadd__",[](shared_ptr<LF> self, shared_ptr<LinearFormIntegrator> lfi)
          { (*self)+=lfi; return self; }, py::arg("lfi"))
 
+    .def("__iadd__",[](shared_ptr<LF> self, shared_ptr<PointEvaluationFunctional> lfi)
+         { (*self)+=lfi; return self; }, py::arg("lfi"))
+
     .def("__iadd__", [](shared_ptr<LF> self, shared_ptr<SumOfIntegrals> sum) 
          {
-           for (auto icf : sum->icfs)
+           for (auto icf : (*sum))
              {
                auto & dx = icf->dx;
                shared_ptr<LinearFormIntegrator> lfi;
@@ -2393,7 +2532,8 @@ integrator : ngsolve.fem.LFI
                            { return MakePyTuple (self->Integrators()); }, "returns tuple of integrators of the linear form")
 
     .def("Assemble", [](shared_ptr<LF> self)
-         { self->Assemble(glh); }, py::call_guard<py::gil_scoped_release>(), "Assemble linear form")
+         { self->Assemble(glh); return self; },
+         py::call_guard<py::gil_scoped_release>(), "Assemble linear form")
     
     .def_property_readonly("components", [](shared_ptr<LF> self)
                    { 
@@ -2482,6 +2622,77 @@ integrator : ngsolve.fem.LFI
                 })
     ;
 
+
+  class PythonPreconditioner : public Preconditioner
+  {
+  protected:
+    shared_ptr<BitArray> freedofs;
+    py::object creator;
+    const BaseMatrix *  mat;
+    shared_ptr<BaseMatrix> premat;
+  public:
+    PythonPreconditioner (shared_ptr<BilinearForm> bfa, const Flags & flags,
+                          py::object acreator)
+      : Preconditioner(bfa, flags), creator(acreator) { }
+    void InitLevel (shared_ptr<BitArray> afreedofs) override
+    { freedofs = afreedofs; }
+    void FinalizeLevel (const ngla::BaseMatrix * amat) override
+    {
+      mat = amat;
+      shared_ptr<BaseMatrix> dummy_sp(const_cast<BaseMatrix*>(amat), NOOP_Deleter);
+
+      py::gil_scoped_acquire agil;
+      premat = py::cast<shared_ptr<BaseMatrix>> (creator(dummy_sp, freedofs));
+    }
+
+    void Update() override
+    {
+      cout << "update pre" << endl;
+    }
+
+    const BaseMatrix & GetAMatrix() const override
+    {
+      return *mat;
+    }
+
+    const BaseMatrix& GetMatrix() const override
+    {
+      return *premat;
+    }
+    
+    shared_ptr<BaseMatrix> GetMatrixPtr() override
+    {
+      return premat;
+    }
+
+    void Mult (const BaseVector & x, BaseVector & y) const override
+    {
+      premat->Mult(x, y);
+    }
+
+    void MultAdd (double s, const BaseVector & x, BaseVector & y) const override
+    {
+      premat->MultAdd(s, x, y);
+    }
+  };
+
+
+  m.def("RegisterPreconditioner", [] (string name, py::object makepre)
+    {
+      cout << "register Python preconditioner " << name << endl;
+      
+      auto creator_function = [makepre]
+        (shared_ptr<BilinearForm> bfa, const Flags & flags, const string & name)
+        -> shared_ptr<Preconditioner> 
+        {
+          py::gil_scoped_acquire aq;
+          return make_shared<PythonPreconditioner> (bfa, flags, makepre);
+        };
+
+      GetPreconditionerClasses().AddPreconditioner (name, nullptr, creator_function);
+    }, py::arg("name"), py::arg("makepre"), "register creator-function makepre(BaseMatrix,FreeDofs)->BaseMatrix");
+  
+  
   //////////////////////////////////////////////////////////////////////////////////////////
 
   py::class_<NumProc, NGS_Object, shared_ptr<NumProc>> (m, "NumProc")
@@ -2993,7 +3204,7 @@ element_wise: bool = False
          [] (const SumOfIntegrals & igls, const MeshAccess & ma, bool element_wise) -> py::object
          {
            bool iscomplex = false;
-           for (auto & ci : igls.icfs)
+           for (auto & ci : igls)
              iscomplex |= ci->cf->IsComplex();
 
            auto integrate = [&] (auto tscal) 
@@ -3004,7 +3215,7 @@ element_wise: bool = False
              Vector<TSCAL> elvals(element_wise ? ma.GetNE() : 0);
              elvals = TSCAL(0.0);
              
-             for (auto & ci : igls.icfs)
+             for (auto & ci : igls)
                sum += ci->Integrate<TSCAL>(ma, elvals);
              if (element_wise) return py::cast(elvals);
              return py::cast(sum);
@@ -3619,12 +3830,14 @@ deformation : ngsolve.comp.GridFunction
      .def("Do", [](shared_ptr<BaseVTKOutput> self, VorB vb)
           { 
             self->Do(glh,vb);
+            return self->lastoutputname;
           },
           py::arg("vb")=VOL,
           py::call_guard<py::gil_scoped_release>())
      .def("Do", [](shared_ptr<BaseVTKOutput> self, VorB vb, const BitArray * drawelems)
           { 
             self->Do(glh, vb, drawelems);
+            return self->lastoutputname;
           },
           py::arg("vb")=VOL,
           py::arg("drawelems"),
@@ -3654,7 +3867,7 @@ Interpolation is done on the fly for each element, no global GridFunction is all
    m.def("ConvertOperator", [&](shared_ptr<FESpace> spacea, shared_ptr<FESpace> spaceb,
 				shared_ptr<ProxyFunction> trial_proxy, shared_ptr<CoefficientFunction> trial_cf,
 				optional<Region> definedon, VorB vb, shared_ptr<BitArray> range_dofs, bool localop, bool parmat, bool use_simd,
-				int bonus_io_ab, int bonus_io_bb) -> shared_ptr<BaseMatrix> {
+				int bonus_io_ab, int bonus_io_bb, bool geom_free) -> shared_ptr<BaseMatrix> {
 
 	   const Region* reg = NULL;
 	   if( definedon.has_value() ) {
@@ -3678,10 +3891,10 @@ Interpolation is done on the fly for each element, no global GridFunction is all
 	       { throw Exception("ProxyFunction has no BBBND evaluator!"); }
 	     if ( eval == nullptr )
 	       { throw Exception(string("trial-proxy has no evaluator vor vb = ") + to_string(vb) + string("!")); }
-	     op = ConvertOperator(spacea, spaceb, vb, glh, eval, trial_cf, reg, range_dofs, localop, parmat, use_simd, bonus_io_ab, bonus_io_bb);
+	     op = ConvertOperator(spacea, spaceb, vb, glh, eval, trial_cf, reg, range_dofs, localop, parmat, use_simd, bonus_io_ab, bonus_io_bb, geom_free);
 	   }
 	   else
-	     { op = ConvertOperator(spacea, spaceb, vb, glh, nullptr, trial_cf, reg, range_dofs, localop, parmat, use_simd, bonus_io_ab, bonus_io_bb); }
+	     { op = ConvertOperator(spacea, spaceb, vb, glh, nullptr, trial_cf, reg, range_dofs, localop, parmat, use_simd, bonus_io_ab, bonus_io_bb, geom_free); }
 
 	   return op;
 	 },
@@ -3696,6 +3909,7 @@ Interpolation is done on the fly for each element, no global GridFunction is all
 	 py::arg("use_simd") = true,
 	 py::arg("bonus_intorder_ab") = 0,
 	 py::arg("bonus_intorder_bb") = 0,
+	 py::arg("geom_free") = false,
      docu_string(R"raw_string(
 A conversion operator between FESpaces. Embedding if spacea is a subspace of spaceb, otherwise an interpolation operator defined by element-wise application of dual shapes (and averaging between elements).
 
@@ -3734,6 +3948,9 @@ use_simd:
 bonus_intorder_ab/bb: int
   Bonus integration order for spacea/spaceb and spaceb/spaceb integrals. Can be useful for curved elements. Should only be necessary for
 spacea/spaceb integrals.
+
+geom_free:
+  If True, assembles a matrix-free operator.
 )raw_string")
 	 );
 
@@ -3745,22 +3962,27 @@ spacea/spaceb integrals.
 	   pchar * pptr = &ptrs[0];
           
 	   static MyMPI mympi(1, (char**)pptr);
-	   // netgen::ng_comm = MPI_COMM_WORLD;
-	   // ngcore::id = MyMPI_GetId(MPI_COMM_WORLD);
-	   // ngcore::ntasks = MyMPI_GetNTasks(MPI_COMM_WORLD);
 	   return NgMPI_Comm(MPI_COMM_WORLD);
 	 });
 
    py::class_<ContactBoundary, shared_ptr<ContactBoundary>>
      (m, "ContactBoundary")
-     .def(py::init<shared_ptr<FESpace>, Region, Region, bool>(),
+     .def(py::init([](shared_ptr<FESpace> fes, Region master, Region minion,
+                      bool draw_pairs)
+     {
+       cout << "WARNING: ContactBoundary constructor with FESpace is deprecated, fes will be set correctly in Update!" << endl;
+       return make_shared<ContactBoundary>(master, minion, draw_pairs);
+     }), "fes"_a, "master"_a, "minion"_a, "draw_pairs"_a = false)
+     .def(py::init<Region, Region, bool>(),
           R"delimiter(
 Class for managing contact interfaces.
 The created object must be kept alive in python as long as
 operations of it are used!
-)delimiter", py::arg("fes"), py::arg("master"), py::arg("minion"), py::arg("draw_pairs")=false)
-     .def("AddEnergy", &ContactBoundary::AddEnergy)
-     .def("AddIntegrator", &ContactBoundary::AddIntegrator)
+)delimiter", "master"_a, "minion"_a, "draw_pairs"_a=false)
+     .def("AddEnergy", &ContactBoundary::AddEnergy,
+          "form"_a, "deformed"_a = false)
+     .def("AddIntegrator", &ContactBoundary::AddIntegrator,
+          "form"_a, "deformed"_a = false)
      .def("Update", &ContactBoundary::Update,
           py::arg("gf"), py::arg("bf") = nullptr,
           py::arg("intorder") = 4, py::arg("maxdist") = 0.,

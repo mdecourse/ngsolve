@@ -10,6 +10,9 @@
 
 // #include <nginterface.h>
 #include <nginterface_v2.hpp>
+#include <variant>
+
+#include <core/ranges.hpp>
 
 namespace ngfem
 {
@@ -25,7 +28,7 @@ namespace ngcomp
   
   class MeshAccess;
   class Ngs_Element;
-  
+  class Region;
 
   class Ngs_Element : public netgen::Ng_Element
   {
@@ -242,6 +245,9 @@ namespace ngcomp
     shared_ptr<Array<Array<INT<2>>>> periodic_node_pairs[3] = {make_shared<Array<Array<INT<2>>>>(),
                                                                make_shared<Array<Array<INT<2>>>>(),
                                                                make_shared<Array<Array<INT<2>>>>()};
+
+    DynamicTable<size_t> neighbours[4][4];
+    friend class Region;
   public:
     Signal<> updateSignal;
 
@@ -250,7 +256,7 @@ namespace ngcomp
     /// connects to Netgen - mesh
     MeshAccess (shared_ptr<netgen::Mesh> amesh);
     /// loads new mesh from file
-    MeshAccess (string filename, NgMPI_Comm amesh_comm = NgMPI_Comm(MPI_COMM_WORLD));
+    MeshAccess (string filename, NgMPI_Comm amesh_comm = NgMPI_Comm{}); // (MPI_COMM_WORLD));
     /// select this mesh in netgen visuaization
     void SelectMesh() const;
     /// not much to do 
@@ -1096,17 +1102,23 @@ namespace ngcomp
     // Uses 0 based identification numbers! Returns periodic node pairs of given identifcation number
     const Array<INT<2>>& GetPeriodicNodes(NODE_TYPE nt, int idnr) const;
 
+    shared_ptr<CoefficientFunction> RegionCF(VorB vb, shared_ptr<CoefficientFunction> default_value, const Array<pair<variant<string, Region>, shared_ptr<CoefficientFunction>>>& region_values);
 
-    virtual void PushStatus (const char * str) const;
-    virtual void PopStatus () const;
-    virtual void SetThreadPercentage (double percent) const;
-    virtual void GetStatus (string & str, double & percent) const;
+    shared_ptr<CoefficientFunction> MaterialCF(shared_ptr<CoefficientFunction> default_value, const Array<pair<variant<string, Region>, shared_ptr<CoefficientFunction>>>& region_values)
+    {
+      return RegionCF(VOL, default_value, region_values);
+    }
 
-    virtual void SetTerminate(void) const;
-    virtual void UnSetTerminate(void) const;
-    virtual bool ShouldTerminate(void) const;
-  
+    shared_ptr<CoefficientFunction> BoundaryCF(shared_ptr<CoefficientFunction> default_value, const Array<pair<variant<string, Region>, shared_ptr<CoefficientFunction>>>& region_values)
+    {
+      return RegionCF(BND, default_value, region_values);
+    }
 
+  private:
+    Table<size_t> elements_of_class;
+    size_t elements_of_class_timestamp = -1;
+  public:
+    const Table<size_t> & GetElementsOfClass(); // classification by vertex numbers
 
   private:
     Array<bool> higher_integration_order;
@@ -1131,7 +1143,7 @@ namespace ngcomp
     template <int DIMS, int DIMR> friend class Ng_ConstElementTransformation;
 
 
-    NgsMPI_Comm GetCommunicator () const { return mesh.GetCommunicator(); }
+    NgMPI_Comm GetCommunicator () const { return mesh.GetCommunicator(); }
 
     /**
        Returns the list of other MPI - processes where node is present.
@@ -1145,20 +1157,27 @@ namespace ngcomp
        Currently, this function works only for vertex-nodes.
      */
 
-    // [[deprecated("should not need global numbers")]]                    
+    [[deprecated("should not need global numbers")]]                    
     size_t GetGlobalNodeNum (NodeId node) const;
-    
+
+    size_t GetGlobalVertexNum (int locnum) const;
     
     FlatArray<int> GetDistantProcs (NodeId node) const
     {
+      return mesh.GetDistantProcs(StdNodeType(node.GetType(), GetDimension()), node.GetNr());
+      /*
       std::tuple<int,int*> tup =
         mesh.GetDistantProcs(StdNodeType(node.GetType(), GetDimension()), node.GetNr());
       return FlatArray<int> (std::get<0>(tup), std::get<1>(tup));
+      */
     }
 
     /// Reduces MPI - distributed data associated with mesh-nodes
     template <typename T>
     void AllReduceNodalData (NODE_TYPE nt, Array<T> & data, MPI_Op op) const;
+
+  private:
+    void BuildNeighbours();
   };
 
 
@@ -1184,31 +1203,35 @@ namespace ngcomp
   {
     shared_ptr<MeshAccess> mesh;
     VorB vb;
-    BitArray mask;
+    shared_ptr<BitArray> mask;
   public:
     Region() {}
     NGS_DLL_HEADER Region (const shared_ptr<MeshAccess> & amesh, VorB avb, string pattern);
+    NGS_DLL_HEADER Region (const shared_ptr<MeshAccess> & amesh, VorB avb, const char* pattern) : Region(amesh, avb, string(pattern)) {}
     NGS_DLL_HEADER Region (const shared_ptr<MeshAccess> & amesh, VorB avb, const BitArray & amask);
+    NGS_DLL_HEADER Region (const shared_ptr<MeshAccess> & amesh, VorB avb, bool all = false);
     Region (const Region &) = default;
     explicit operator VorB () const { return vb; }
     VorB VB() const { return vb; }
     bool IsVolume () const { return vb == VOL; }
     bool IsBoundary () const { return vb == BND; }
     bool IsCoDim2() const { return vb == BBND; }
-    const BitArray & Mask() const { return mask; }
-    operator const BitArray & () const { return mask; }
-    shared_ptr<MeshAccess> Mesh() const { return mesh; }
+    const BitArray & Mask() const { return *mask; }
+    BitArray& Mask() { return *mask; }
+    operator const BitArray & () const { return *mask; }
+    shared_ptr<BitArray> MaskPtr() { return mask; }
+    const shared_ptr<MeshAccess> & Mesh() const { return mesh; }
     Region operator+ (const Region & r2) const
     {
-      return Region (mesh, vb, BitArray(mask).Or (r2.Mask()));
+      return Region (mesh, vb, BitArray(*mask).Or(r2.Mask()));
     }
     Region operator- (const Region & r2) const
     {
-      return Region (mesh, vb, BitArray(mask).And ( BitArray(r2.Mask()).Invert() ));
+      return Region (mesh, vb, BitArray(*mask).And(BitArray(r2.Mask()).Invert()));
     }
     Region operator~ () const
     {
-      return Region (mesh, vb, BitArray(mask).Invert());
+      return Region (mesh, vb, BitArray(*mask).Invert());
     }
     Region operator+ (const string & pattern2) const
     {
@@ -1217,6 +1240,29 @@ namespace ngcomp
     Region operator- (const string & pattern2) const
     {
       return *this - Region(mesh, vb, pattern2);
+    }
+
+    Region operator* (const Region& r2) const
+    {
+      return Region(mesh, vb, BitArray(*mask).And(r2.Mask()));
+    }
+
+    Region operator* (const string& pattern) const
+    {
+      return *this * Region(mesh, vb, pattern);
+    }
+
+    bool operator==(const Region& other) const;
+    size_t Hash() const;
+
+    // Get adjacent regions of codim other_vb
+    Region GetNeighbours(VorB other_vb);
+    Region GetBoundaries() { return GetNeighbours(VorB(int(vb)+1)); }
+
+    auto GetElements() const
+    {
+      return mesh->Elements(vb)
+        | filter([&](auto ei) { return mask->Test(mesh->GetElIndex(ei)); });
     }
   };
 
@@ -1274,7 +1320,7 @@ namespace ngcomp
   void MeshAccess::
   AllReduceNodalData (NODE_TYPE nt, Array<T> & data, MPI_Op op) const
   {
-    NgsMPI_Comm comm = GetCommunicator();
+    NgMPI_Comm comm = GetCommunicator();
     if (comm.Size() <= 1) return;
 
     Array<int> cnt(comm.Size());

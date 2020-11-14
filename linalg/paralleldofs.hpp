@@ -21,7 +21,7 @@ namespace ngla
   {
   protected:
     /// the communicator 
-    NgsMPI_Comm comm;
+    NgMPI_Comm comm;
     
     /// local ndof
     size_t ndof;
@@ -58,6 +58,8 @@ namespace ngla
 		  int dim = 1, bool iscomplex = false);
 
     shared_ptr<ParallelDofs> SubSet (shared_ptr<BitArray> take_dofs) const;
+
+    shared_ptr<ParallelDofs> Range (IntRange range) const;
       
     virtual ~ParallelDofs();
 
@@ -74,7 +76,10 @@ namespace ngla
 
     bool IsMasterDof (size_t localdof) const
     { return ismasterdof.Test(localdof); }
-
+    
+    const auto & MasterDofs () const
+    { return ismasterdof; }
+    
     size_t GetNDofLocal () const { return ndof; }
 
     size_t GetNDofGlobal () const { return global_ndof; }
@@ -82,10 +87,10 @@ namespace ngla
     bool IsExchangeProc (int proc) const
     { return exchangedofs[proc].Size() != 0; }
 
-    MPI_Datatype MyGetMPI_Type (int dest) const
+    MPI_Datatype GetMPI_Type (int dest) const
     { return mpi_t[dest]; }
 
-    const NgsMPI_Comm & GetCommunicator () const { return comm; }
+    const NgMPI_Comm & GetCommunicator () const { return comm; }
 
     int GetEntrySize () const { return es; }
     bool IsComplex () const { return complex; }
@@ -124,7 +129,7 @@ namespace ngla
     int ndof;
     int es;
     bool complex;
-    
+    BitArray masterdofs;
   public:
     ParallelDofs (MPI_Comm acomm, Table<int> && adist_procs, 
 		  int dim = 1, bool iscomplex = false)
@@ -136,6 +141,9 @@ namespace ngla
     
     int GetNTasks() const { return 1; }
     NgMPI_Comm GetCommunicator () const { return NgMPI_Comm(MPI_COMM_WORLD); }
+
+    shared_ptr<ParallelDofs> Range (IntRange range) const
+    { return nullptr; }
     
     FlatArray<int> GetExchangeDofs (int proc) const
     { return FlatArray<int> (0, nullptr); }
@@ -148,6 +156,9 @@ namespace ngla
 
     bool IsMasterDof (size_t localdof) const
     { return true; }
+
+    const BitArray & MasterDofs () const;
+    void EnumerateGlobally (shared_ptr<BitArray> freedofs, Array<int> & globnum, int & num_glob_dofs) const;
     
     template <typename T>
     void ReduceDofData (FlatArray<T> data, MPI_Op op) const { ; }
@@ -251,7 +262,7 @@ namespace ngla
     Array<int> cnt(ntasks);
     cnt = 0;
     
-    MPI_Datatype type = MyGetMPIType<T>();
+    MPI_Datatype type = GetMPIType<T>();
     for (int i = 0; i < GetNDofLocal(); i++)
       if (IsMasterDof(i))
 	{
@@ -269,9 +280,6 @@ namespace ngla
   template <typename T>
   void ParallelDofs :: ScatterDofData (FlatArray<T> data) const
   {
-    // if (this == NULL)   // illformed C++, shall get rid of this
-    // throw Exception("ScatterDofData for null-object");
-    
     static Timer t0("ParallelDofs :: ScatterDofData");
     RegionTimer rt(t0);
 
@@ -280,12 +288,12 @@ namespace ngla
     int rank = comm.Rank();
     if (ntasks <= 1) return;
 
-
     Array<int> nsend(ntasks), nrecv(ntasks);
     nsend = 0;
     nrecv = 0;
 
     /** Count send/recv size **/
+    /*
     for (int i = 0; i < GetNDofLocal(); i++) {
       auto dps = GetDistantProcs(i);
       if(!dps.Size()) continue;
@@ -296,12 +304,23 @@ namespace ngla
       else
 	nrecv[master]++;
     }
-
+    */
+    for (int i = 0; i < GetNDofLocal(); i++) 
+      if (auto dps = GetDistantProcs(i); dps.Size() > 0)
+        {
+          if (rank < dps[0])
+            for (auto p : dps)
+              nsend[p]++;
+          else
+            nrecv[dps[0]]++;
+        }
+    
     Table<T> send_data(nsend);
     Table<T> recv_data(nrecv);
 
     /** Fill send_data **/
     nsend = 0;
+    /*
     for (int i = 0; i < GetNDofLocal(); i++) {
       auto dps = GetDistantProcs(i);
       if(!dps.Size()) continue;
@@ -310,7 +329,13 @@ namespace ngla
 	for(auto p:dps)
 	  send_data[p][nsend[p]++] = data[i];
     }
-
+    */
+    for (int i = 0; i < GetNDofLocal(); i++) 
+      if (auto dps = GetDistantProcs(i); dps.Size() > 0)
+        if (rank < dps[0])
+          for (auto p : dps)
+            send_data[p][nsend[p]++] = data[i];
+    
     Array<MPI_Request> requests;
     for (int i = 0; i < ntasks; i++)
       {
@@ -324,7 +349,8 @@ namespace ngla
 
     Array<int> cnt(ntasks);
     cnt = 0;
-    
+
+    /*
     for (int i = 0; i < GetNDofLocal(); i++)
       if (!IsMasterDof(i))
 	{
@@ -335,10 +361,27 @@ namespace ngla
 	    master = min (master, distprocs[j]);
 	  data[i] = recv_data[master][cnt[master]++];
 	}
+    */
+    for (int i = 0; i < GetNDofLocal(); i++)
+      if (!IsMasterDof(i))
+	{
+	  int master = GetDistantProcs (i)[0];
+	  data[i] = recv_data[master][cnt[master]++];
+	}
   }    
 
 #endif //PARALLEL
 
+
+  class DofRange : public T_Range<size_t>
+  {
+    shared_ptr<ParallelDofs> pardofs;
+  public:
+    DofRange (T_Range<size_t> range, shared_ptr<ParallelDofs> apardofs)
+      : T_Range<size_t>(range), pardofs(apardofs) { ; }
+    shared_ptr<ParallelDofs> GetParallelDofs() const { return pardofs; }
+  };
+  
 
 }
 

@@ -199,7 +199,7 @@ namespace ngcomp
     void UnsetPreconditioner(Preconditioner* pre);
 
     /// generates matrix graph
-    virtual MatrixGraph * GetGraph (int level, bool symmetric);
+    virtual MatrixGraph GetGraph (int level, bool symmetric);
 
     /// assembles the matrix
     void Assemble (LocalHeap & lh);
@@ -287,8 +287,8 @@ namespace ngcomp
     /// is there a low-order biform ?
     bool HasLowOrderBilinearForm () const { return low_order_bilinear_form != NULL; }
 
-    /// returns the low-order biform
-    shared_ptr<BilinearForm> GetLowOrderBilinearForm() const
+    /// returns the low-order biform, if we can provide it ...
+    virtual shared_ptr<BilinearForm> GetLowOrderBilinearForm() 
     {
       return low_order_bilinear_form;
     }
@@ -408,8 +408,8 @@ namespace ngcomp
     virtual Array<MemoryUsage> GetMemoryUsage () const;
 
     /// creates a compatible vector
-    virtual shared_ptr<BaseVector> CreateRowVector() const = 0;
-    virtual shared_ptr<BaseVector> CreateColVector() const = 0;
+    virtual unique_ptr<BaseVector> CreateRowVector() const = 0;
+    virtual unique_ptr<BaseVector> CreateColVector() const = 0;
 
     /// frees matrix 
     virtual void CleanUpLevel() { ; }
@@ -437,11 +437,14 @@ namespace ngcomp
   {
   protected:
 
-    shared_ptr<ElementByElementMatrix<SCAL>> harmonicext; //  = NULL;
-    shared_ptr<BaseMatrix> harmonicexttrans; //  = NULL;
-    shared_ptr<ElementByElementMatrix<SCAL>> innersolve; //  = NULL;
-    shared_ptr<ElementByElementMatrix<SCAL>> innermatrix; //  = NULL;
+    shared_ptr<BaseMatrix> harmonicext;
+    shared_ptr<BaseMatrix> harmonicexttrans; 
+    shared_ptr<BaseMatrix> innersolve;
+    shared_ptr<BaseMatrix> innermatrix;
 
+    ElementByElementMatrix<SCAL> *harmonicext_ptr, *harmonicexttrans_ptr, *innersolve_ptr, *innermatrix_ptr;
+
+    
 #ifdef PARALLEL
     //data for mpi-facets; only has data if there are relevant integrators in the BLF!
     mutable bool have_mpi_facet_data = false;
@@ -636,7 +639,7 @@ namespace ngcomp
     typedef typename mat_traits<TM>::TSCAL TSCAL;
     typedef TV TV_COL;
     typedef SparseMatrix<TM,TV,TV> TMATRIX;
-    TMATRIX * mymatrix;
+    shared_ptr<TMATRIX> mymatrix;
   protected:
 
   public:
@@ -651,23 +654,25 @@ namespace ngcomp
     virtual ~T_BilinearForm ();
 
     ///
-    virtual void AllocateMatrix ();
+    virtual shared_ptr<BilinearForm> GetLowOrderBilinearForm() override;
+
+    virtual void AllocateMatrix () override;
 
     ///
-    virtual shared_ptr<BaseVector> CreateRowVector() const;
-    virtual shared_ptr<BaseVector> CreateColVector() const;
+    virtual unique_ptr<BaseVector> CreateRowVector() const override;
+    virtual unique_ptr<BaseVector> CreateColVector() const override;
 
     ///
-    virtual void CleanUpLevel();
+    virtual void CleanUpLevel() override;
 
     ///
     virtual void AddElementMatrix (FlatArray<int> dnums1,
 				   FlatArray<int> dnums2,
 				   BareSliceMatrix<TSCAL> elmat,
 				   ElementId id, 
-				   LocalHeap & lh);
+				   LocalHeap & lh) override;
 
-    virtual void LapackEigenSystem(FlatMatrix<TSCAL> & elmat, LocalHeap & lh) const;
+    virtual void LapackEigenSystem(FlatMatrix<TSCAL> & elmat, LocalHeap & lh) const override;
   };
 
 
@@ -683,26 +688,27 @@ namespace ngcomp
     typedef typename mat_traits<TM>::TSCAL TSCAL;
     typedef TV TV_COL;
     typedef SparseMatrixSymmetric<TM,TV> TMATRIX;
-    TMATRIX * mymatrix;    
+    shared_ptr<TMATRIX> mymatrix;    
   protected:
     
 
   public:
     T_BilinearFormSymmetric (shared_ptr<FESpace> afespace, const string & aname,
 			     const Flags & flags);
-    virtual ~T_BilinearFormSymmetric ();
+    virtual ~T_BilinearFormSymmetric () override;
 
-    virtual void AllocateMatrix ();
-    virtual void CleanUpLevel();
-
-    virtual shared_ptr<BaseVector> CreateRowVector() const;
-    virtual shared_ptr<BaseVector> CreateColVector() const;
+    virtual void AllocateMatrix () override;
+    virtual void CleanUpLevel() override;
+    virtual shared_ptr<BilinearForm> GetLowOrderBilinearForm() override;
+    
+    virtual unique_ptr<BaseVector> CreateRowVector() const override;
+    virtual unique_ptr<BaseVector> CreateColVector() const override;
 
     virtual void AddElementMatrix (FlatArray<int> dnums1,
 				   FlatArray<int> dnums2,
                                    BareSliceMatrix<TSCAL> elmat,
 				   ElementId id, 
-				   LocalHeap & lh);
+				   LocalHeap & lh) override;
     /*
     virtual void ApplyElementMatrix(const BaseVector & x,
 				    BaseVector & y,
@@ -716,10 +722,10 @@ namespace ngcomp
 				    const FiniteElement * fel,
 				    const SpecialElement * sel = NULL) const;
     */
-    virtual bool SymmetricStorage() const { return true; }
+    virtual bool SymmetricStorage() const override { return true; }
 
 
-    virtual void LapackEigenSystem(FlatMatrix<TSCAL> & elmat, LocalHeap & lh) const;
+    virtual void LapackEigenSystem(FlatMatrix<TSCAL> & elmat, LocalHeap & lh) const override;
   };
 
 
@@ -737,8 +743,8 @@ namespace ngcomp
     virtual void AllocateMatrix () { cout << "S_BilinearFormNonAssemble :: Allocate: nothing to do" << endl; }
     virtual void CleanUpLevel() { ; } 
 
-    virtual shared_ptr<BaseVector> CreateRowVector() const;
-    virtual shared_ptr<BaseVector> CreateColVector() const;
+    virtual unique_ptr<BaseVector> CreateRowVector() const;
+    virtual unique_ptr<BaseVector> CreateColVector() const;
 
     virtual void AddElementMatrix (FlatArray<int> dnums1,
 				   FlatArray<int> dnums2,
@@ -789,8 +795,8 @@ namespace ngcomp
     virtual ~T_BilinearFormDiagonal ();
 
     virtual void AllocateMatrix ();
-    virtual shared_ptr<BaseVector> CreateRowVector() const;
-    virtual shared_ptr<BaseVector> CreateColVector() const;
+    virtual unique_ptr<BaseVector> CreateRowVector() const;
+    virtual unique_ptr<BaseVector> CreateColVector() const;
 
     virtual void AddElementMatrix (FlatArray<int> dnums1,
 				   FlatArray<int> dnums2,
@@ -873,9 +879,9 @@ namespace ngcomp
     { throw Exception ("comp-bf - ComputeInternal is illegal"); } 
     virtual void ModifyRHS (BaseVector & f) const 
     { throw Exception ("comp-bf - ModifyRHS is illegal"); } 
-    virtual shared_ptr<BaseVector> CreateRowVector() const 
+    virtual unique_ptr<BaseVector> CreateRowVector() const 
     { throw Exception ("comp-bf - CreateRowVector is illegal"); } 
-    virtual shared_ptr<BaseVector> CreateColVector() const 
+    virtual unique_ptr<BaseVector> CreateColVector() const 
     { throw Exception ("comp-bf - CreateColVector is illegal"); } 
     virtual void DoAssemble (LocalHeap & lh) 
     { throw Exception ("comp-bf - DoAssemble is illegal"); } 
@@ -999,8 +1005,8 @@ namespace ngcomp
     virtual ~ElementByElement_BilinearForm () override;
     
     virtual void AllocateMatrix () override;
-    virtual shared_ptr<BaseVector> CreateRowVector() const override;
-    virtual shared_ptr<BaseVector> CreateColVector() const override;
+    virtual unique_ptr<BaseVector> CreateRowVector() const override;
+    virtual unique_ptr<BaseVector> CreateColVector() const override;
     
     virtual void AddElementMatrix (FlatArray<int> dnums1,
                                    FlatArray<int> dnums2,

@@ -32,13 +32,17 @@ function setKeys (dst, src) {
   }
 }
 
-function getShader(name, defines = {})
+function getShader(name, defines = {}, user_eval_function = null)
 {
   defines = {...defines}; // copy dictionary
   if(name.endsWith(".vert"))
     defines["VERTEX_SHADER"] = true;
   if(name.endsWith(".frag"))
     defines["FRAGMENT_SHADER"] = true;
+
+  if(user_eval_function)
+    defines["USER_FUNCTION"] = user_eval_function;
+
   var s ="";
   var nl = String.fromCharCode(10); // avoid escape characters
   for(var key in defines)
@@ -355,6 +359,7 @@ export class Scene {
   colormap_labels: any;
   container: any;
   stats: any;
+  event_handlers: any;
 
   gui: any;
   gui_status_default: any;
@@ -410,6 +415,7 @@ export class Scene {
 
   version_object: any;
   c_autoscale: any;
+  c_eval: any;
 
   colormap_texture: any;
 
@@ -455,9 +461,28 @@ export class Scene {
 
     this.label_style  = '-moz-user-select: none; -webkit-user-select: none; -ms-user-select:none; onselectstart="return false;';
     this.label_style += 'onmousedown="return false; user-select:none;-o-user-select:none;unselectable="on";';
-    this.label_style += 'position: absolute; z-index: 100; display:block;';
+    this.label_style += 'position: absolute; z-index: 1; display:block;';
     this.requestId = 0;
+    this.event_handlers = {};
   }
+
+  on( event_name, handler ) {
+    if(this.event_handlers[event_name] == undefined)
+      this.event_handlers[event_name] = [];
+
+    this.event_handlers[event_name].push( handler );
+  }
+
+  handleEvent( event_name, args )
+  {
+    let handlers = this.event_handlers[event_name];
+    if(handlers == undefined)
+      return;
+
+    for(var i=0; i<handlers.length; i++)
+      handlers[i].apply(null, args);
+  }
+
 
   setGuiSettings (settings) {
     console.log("in gui settings");
@@ -538,9 +563,9 @@ export class Scene {
 
 
     var t2 = new THREE.Vector3();
-    if(normal.z<0.5)
+    if(Math.abs(normal.z)<0.5)
       plane0.projectPoint(new THREE.Vector3(0,0,1), t2);
-    else if(normal.y<0.5)
+    else if(Math.abs(normal.y)<0.5)
       plane0.projectPoint(new THREE.Vector3(0,1,0), t2);
     else
       plane0.projectPoint(new THREE.Vector3(1,0,0), t2);
@@ -583,6 +608,26 @@ export class Scene {
     }
     geo.maxInstancedCount = n*n;
     geo.setAttribute( 'arrowid', new THREE.InstancedBufferAttribute( arrowid, 2 ) );
+    this.animate();
+  }
+
+  updateColormapToAutoscale()
+  {
+    let s = this.gui_status;
+    let def = this.gui_status_default;
+    if(s.eval==3) // drawing norm -> min is 0
+    {
+      s.colormap_min = 0.0;
+      s.colormap_max = Math.max(def.colormap_max, def.colormap_min);
+    }
+    else
+    {
+      s.colormap_min = def.colormap_min;
+      s.colormap_max = def.colormap_max;
+    }
+    this.c_cmin.updateDisplay();
+    this.c_cmax.updateDisplay();
+    this.updateColormapLabels();
     this.animate();
   }
 
@@ -699,9 +744,10 @@ export class Scene {
     this.mouse = new THREE.Vector2(0.0, 0.0);
     this.center_tag = null;
 
-    let gui = new dat.GUI({autoplace: false, closeOnTop: true});
+    let gui = new dat.GUI({autoplace: false, closeOnTop: true, scrollable: true, closed: true});
+    gui.closed = true;
     let gui_container = document.createElement( 'div' );
-    gui_container.setAttribute("style", 'position: absolute; z-index: 200; display:block; right: 0px; top: 0px');
+    gui_container.setAttribute("style", 'position: absolute; z-index: 2; display:block; right: 0px; top: 0px');
     gui_container.appendChild(gui.domElement);
     this.container.appendChild(gui_container);
 
@@ -743,7 +789,7 @@ export class Scene {
     {
       this.gui_status_default.eval = 5;
       gui_status.eval = 5;
-      gui.add(gui_status, "eval", {"real": 5,"imag":6,"norm":7}).onChange(animate);
+      this.c_eval = gui.add(gui_status, "eval", {"real": 5,"imag":6,"norm":3}).onChange(animate);
 
       let cgui = gui.addFolder("Complex");
       this.phase_controller = cgui.add(gui_status.Complex, "phase", 0, 2*Math.PI, 0.001).onChange(animate);
@@ -752,9 +798,28 @@ export class Scene {
       uniforms.complex_scale = new THREE.Uniform( new THREE.Vector2(1, 0) );
     }
     else if(render_data.funcdim==2)
-      gui.add(gui_status, "eval", {"0": 0,"1":1,"norm":3}).onChange(animate);
+    {
+        gui_status.eval = 3;
+        this.c_eval = gui.add(gui_status, "eval", {"0": 0,"1":1,"norm":3}).onChange(animate);
+    }
     else if(render_data.funcdim==3)
-      gui.add(gui_status, "eval", {"0": 0,"1":1,"2":2,"norm":3}).onChange(animate);
+    {
+        gui_status.eval = 3;
+        this.c_eval = gui.add(gui_status, "eval", {"0": 0,"1":1,"2":2,"norm":3}).onChange(animate);
+    }
+
+    if(this.c_eval)
+    {
+      if(render_data.eval != undefined)
+      {
+        this.gui_status_default.eval = render_data.eval;
+        this.c_eval.setValue(render_data.eval);
+      }
+      this.c_eval.onChange(()=> {
+        if(gui_status.autoscale)
+          this.updateColormapToAutoscale();
+      });
+    }
 
 
     if(render_data.mesh_dim == 3)
@@ -762,11 +827,45 @@ export class Scene {
       let gui_clipping = gui.addFolder("Clipping");
       if(render_data.draw_vol)
       {
-        gui_clipping.add(gui_status.Clipping, "function").onChange(animate);
+        if(render_data.clipping_function != undefined)
+          {
+              this.gui_status_default.Clipping.function = render_data.clipping_function;
+              gui_status.Clipping.function = render_data.clipping_function;
+          }
 
         this.clipping_function_object = this.createClippingPlaneMesh(render_data);
         this.pivot.add(this.clipping_function_object);
+        gui_clipping.add(gui_status.Clipping, "function").onChange(animate);
       }
+
+      if(render_data.clipping)
+        {
+            console.log("render data clipping found");
+            this.gui_status_default.Clipping.enable = true;
+            gui_status.Clipping.enable = true;
+            if(render_data.clipping_x != undefined)
+            {
+                this.gui_status_default.Clipping.x = render_data.clipping_x;
+                gui_status.Clipping.x = render_data.clipping_x;
+            }
+            if(render_data.clipping_y != undefined)
+            {
+                this.gui_status_default.Clipping.y = render_data.clipping_y;
+                gui_status.Clipping.y = render_data.clipping_y;
+            }
+            if(render_data.clipping_z != undefined)
+            {
+                this.gui_status_default.Clipping.z = render_data.clipping_z;
+                gui_status.Clipping.z = render_data.clipping_z;
+            }
+            if(render_data.clipping_dist != undefined)
+            {
+                this.gui_status_default.Clipping.dist = render_data.clipping_dist;
+                gui_status.Clipping.dist = render_data.clipping_dist;
+            }
+        }
+        else
+            console.log("render data not clipping found!!!");
 
       gui_clipping.add(gui_status.Clipping, "enable").onChange(animate);
       gui_clipping.add(gui_status.Clipping, "x", -1.0, 1.0).onChange(animate);
@@ -780,10 +879,27 @@ export class Scene {
     draw_vectors = draw_vectors && (render_data.draw_surf && render_data.mesh_dim==2 || render_data.draw_vol && render_data.mesh_dim==3);
     if(draw_vectors)
     {
+      if(render_data.vectors)
+        {
+            this.gui_status_default.Vectors.show = true;
+            gui_status.Vectors.show = true;
+            if(render_data.vectors_grid_size)
+            {
+                this.gui_status_default.Vectors.grid_size = render_data.vectors_grid_size;
+                gui_status.Vectors.grid_size = render_data.vectors_grid_size;
+            }
+            if(render_data.vectors_offset)
+            {
+                this.gui_status_default.Vectors.offset = render_data.vectors_offset;
+                gui_status.Vectors.offset = render_data.vectors_offset;
+            }
+        }
+
       let gui_vec = gui.addFolder("Vectors");
       gui_vec.add(gui_status.Vectors, "show").onChange(animate);
       gui_vec.add(gui_status.Vectors, "grid_size", 1, 100, 1).onChange(()=>this.updateGridsize());
       gui_vec.add(gui_status.Vectors, "offset", -1.0, 1.0, 0.001).onChange(animate);
+
 
       if(render_data.mesh_dim==2)
         this.buffer_object = this.mesh_object.clone();
@@ -822,14 +938,7 @@ export class Scene {
 
       this.c_autoscale.onChange((checked)=> {
         if(checked)
-        {
-          this.gui_status.colormap_min = this.gui_status_default.colormap_min;
-          this.gui_status.colormap_max = this.gui_status_default.colormap_max;
-          this.c_cmin.updateDisplay();
-          this.c_cmax.updateDisplay();
-          this.updateColormapLabels();
-          this.animate();
-        }
+          this.updateColormapToAutoscale();
       });
 
       if(cmax>cmin)
@@ -961,6 +1070,13 @@ export class Scene {
 
     this.updateRenderData(render_data);
     setTimeout(()=> this.onResize(), 0);
+    console.log("Scene init done", this);
+    if(render_data.on_init) {
+      var on_init = Function("scene", "render_data", render_data.on_init);
+      on_init(this, render_data);
+    }
+
+    this.animate();
   }
 
   updateColormap( )
@@ -1100,7 +1216,7 @@ export class Scene {
 
     var mesh_material = new THREE.RawShaderMaterial({
       vertexShader: getShader( 'trigsplines.vert', defines ),
-      fragmentShader: getShader( 'function.frag', defines ),
+      fragmentShader: getShader( 'function.frag', defines, this.render_data.user_eval_function ),
       side: THREE.DoubleSide,
       uniforms: this.uniforms
     });
@@ -1144,7 +1260,7 @@ export class Scene {
   {
     var material = new THREE.RawShaderMaterial({
       vertexShader: getShader( 'vector_function.vert' ),
-      fragmentShader: getShader( 'function.frag', {NO_CLIPPING: 1}),
+      fragmentShader: getShader( 'function.frag', {NO_CLIPPING: 1}, this.render_data.user_eval_function),
       side: THREE.DoubleSide,
       uniforms: this.uniforms
     });
@@ -1161,7 +1277,7 @@ export class Scene {
     const defines = {ORDER: data.order3d, SKIP_FACE_CHECK: 1, NO_CLIPPING: 1};
     var material = new THREE.RawShaderMaterial({
       vertexShader: getShader( 'clipping_vectors.vert', defines ),
-      fragmentShader: getShader( 'function.frag', defines ),
+      fragmentShader: getShader( 'function.frag', defines , this.render_data.user_eval_function),
       side: THREE.DoubleSide,
       uniforms: this.uniforms
     });
@@ -1335,8 +1451,16 @@ export class Scene {
 
       if(this.gui_status.autoscale)
       {
-        this.gui_status.colormap_min = cmin;
-        this.gui_status.colormap_max = cmax;
+        if(this.gui_status.eval == 3) // norm of vector-valued function
+        {
+          this.gui_status.colormap_min = 0;
+          this.gui_status.colormap_max = Math.max(Math.abs(cmin), Math.abs(cmax));
+        }
+        else
+        {
+          this.gui_status.colormap_min = cmin;
+          this.gui_status.colormap_max = cmax;
+        }
         this.c_cmin.updateDisplay();
         this.c_cmax.updateDisplay();
         this.updateColormapLabels();
@@ -1495,7 +1619,6 @@ export class Scene {
     if (this.center_tag != null) {
       this.pivot.remove(this.center_tag);
       this.center_tag = null;
-      console.log("remove center tag");
     }
     if (position != null) {
       const n = 101;
@@ -1571,8 +1694,8 @@ export class Scene {
           this.controls.center.setComponent(i, (pixel_buffer[i]-this.trafo.y)/this.trafo.x);
         }
       }
-      console.log("controls.center", this.controls.center);
       this.setCenterTag(this.controls.center);
+      this.handleEvent('selectpoint', [this, this.controls.center] );
       this.mouse.set(0.0, 0.0);
       this.get_pixel = false;
     }
@@ -1581,6 +1704,8 @@ export class Scene {
 
     if(this.ortho_camera === undefined)
       return; // not fully initialized yet
+
+    this.handleEvent('beforerender', [this, frame_time]);
 
     let gui_status = this.gui_status;
     let uniforms = this.uniforms;
@@ -1635,8 +1760,8 @@ export class Scene {
 
     let three_clipping_plane = this.three_clipping_plane;
     three_clipping_plane.normal.set(gui_status.Clipping.x, gui_status.Clipping.y, gui_status.Clipping.z);
-    three_clipping_plane.normal.normalize();
-    three_clipping_plane.constant = gui_status.Clipping.dist; // -three_clipping_plane.normal.dot(mesh_center);
+      three_clipping_plane.normal.normalize();
+    three_clipping_plane.constant = gui_status.Clipping.dist-three_clipping_plane.normal.dot(this.mesh_center);
 
     // console.log("three_clipping_plane normal and const", three_clipping_plane.normal, three_clipping_plane.constant);
 
@@ -1734,5 +1859,6 @@ export class Scene {
       this.animate();
     }
     this.last_frame_time = now;
+    this.handleEvent('beforerender', [this, frame_time]);
   }
 }

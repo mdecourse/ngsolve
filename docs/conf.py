@@ -49,7 +49,7 @@ html_sourcelink_suffix = ''
 # nbsphinx_execute = 'never'
 
 # If True, the build process is continued even if an exception occurs:
-nbsphinx_allow_errors = True
+nbsphinx_allow_errors = False
 
 # This is processed by Jinja2 and inserted before each notebook
 nbsphinx_prolog = r"""
@@ -64,12 +64,12 @@ nbsphinx_prolog = r"""
         .dg.main {
             margin-left: 0px;
         }
-        .wy-plain-list-disc li, .rst-content .section ul li, .rst-content .toctree-wrapper ul li, article ul li {
+        div.p-Widget div div div div.dg ul li {
             list-style: none;
             margin-left: 0px;
         }
-        .wy-plain-list-disc li li, .rst-content .section ul li li, .rst-content .toctree-wrapper ul li li, article ul li li {
-            list-style: none;
+        div.p-Widget div div div div.dg ul li div.dg {
+            margin-bottom: 0px;
         }
     </style>
 
@@ -227,11 +227,11 @@ html_favicon = "@CMAKE_CURRENT_SOURCE_DIR@/_static/favicon.ico"
 # """
 
 rst_epilog = """
-.. |python_version| replace:: 3.7
+.. |python_version| replace:: 3.8
 
 """
 
 todo_include_todos = True
 
 def setup(app):
-    app.add_stylesheet("custom.css")
+    app.add_css_file("custom.css")

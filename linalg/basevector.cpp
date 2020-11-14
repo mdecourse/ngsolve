@@ -12,27 +12,25 @@
 
 #include <la.hpp>
 
-#ifdef PARALLEL
-#include "../parallel/parallelvector.hpp"
-#endif
+// #ifdef PARALLEL
+#include "../parallel/parallelvector.hpp"   // for BlockVector
+// #endif
 
 
 namespace ngla
 {
-
   using namespace ngbla;
   
-#ifdef PARALLEL
-  class ParallelBaseVector;
-#endif
-
-
   unique_ptr<MultiVector> BaseVector :: CreateMultiVector (size_t cnt) const
   {
     return make_unique<MultiVector> (CreateVector(), cnt);
   }
 
-  
+  AutoVector BaseVector::Range (DofRange range) const
+  {
+    return Range(T_Range<size_t>(range));
+  }
+
   double BaseVector :: L2Norm () const
   {
     static Timer t("BaseVector::L2Norm");
@@ -118,7 +116,7 @@ namespace ngla
     auto me = FVDouble();
     auto you = v.FVDouble();
 
-    if (&me(0) == &you(0) && scal==1.0) return *this;
+    if (me.Addr(0) == you.Addr(0) && scal==1.0) return *this;
     
     t.AddFlops (me.Size());
 
@@ -189,12 +187,12 @@ namespace ngla
       InnerProduct (v2, conjugate);
   }
 
-
+  /*
   AutoVector BaseVector ::Range (size_t begin, size_t end) const
   {
     throw Exception ("BaseVector::Range const called");
   }
-
+  */
   AutoVector BaseVector :: Range (T_Range<size_t> range) const
   {
     throw Exception ("BaseVector::Range (IntRange) const called");
@@ -308,21 +306,21 @@ namespace ngla
 
   AutoVector CreateBaseVector(size_t size, bool is_complex, int es)
   {
-    shared_ptr<BaseVector> res;
+    unique_ptr<BaseVector> res;
     if(es > 1)
       {
         if(is_complex)
-          res = make_shared<S_BaseVectorPtr<Complex>> (size, es);
+          res = make_unique<S_BaseVectorPtr<Complex>> (size, es);
         else
-          res = make_shared<S_BaseVectorPtr<double>> (size, es);
-        return res;
+          res = make_unique<S_BaseVectorPtr<double>> (size, es);
+        return move(res);
       }
     
     if (is_complex)
-      res = make_shared<VVector<Complex>> (size);
+      res = make_unique<VVector<Complex>> (size);
     else
-      res = make_shared<VVector<double>> (size);
-    return res;
+      res = make_unique<VVector<double>> (size);
+    return move(res);
   }
 
 
@@ -331,7 +329,7 @@ namespace ngla
   {
     FlatVector<Complex> fv = FVScal();
     return FlatVector<Complex> (fv.Size() * sizeof(Complex)/sizeof(Complex),
-                                reinterpret_cast<Complex*> (&fv(0)));
+                                reinterpret_cast<Complex*> (fv.Addr(0)));
   }
 
 
@@ -362,7 +360,7 @@ namespace ngla
   {
     if (EntrySize() == 1)
       {
-        FlatVector<double> lsv(Size(), &FVDouble()(0));
+        FlatVector<double> lsv(Size(), FVDouble().Addr(0));
         for (auto i : ind.Range())
           {
             int index = ind[i];
@@ -390,8 +388,8 @@ namespace ngla
       }
     else
       {
-        FlatSysVector<double> lsv(Size(), EntrySize(), &FVDouble()(0));
-        FlatSysVector<double> sv(ind.Size(), EntrySize(), &v(0));
+        FlatSysVector<double> lsv(Size(), EntrySize(), FVDouble().Addr(0));
+        FlatSysVector<double> sv(ind.Size(), EntrySize(), v.Addr(0));
         
         for (size_t i = 0; i < ind.Size(); i++)
           if (IsRegularIndex(ind[i]))
@@ -405,8 +403,8 @@ namespace ngla
   void S_BaseVector<double> :: GetIndirect (FlatArray<int> ind, 
 					    FlatVector<Complex> v) const 
   { 
-    FlatSysVector<double> lsv(Size(), EntrySize(), &FVDouble()(0));
-    FlatSysVector<Complex> sv(ind.Size(), EntrySize(), &v(0));
+    FlatSysVector<double> lsv(Size(), EntrySize(), FVDouble().Addr(0));
+    FlatSysVector<Complex> sv(ind.Size(), EntrySize(), v.Addr(0));
 
     for (size_t i = 0; i < ind.Size(); i++)
       if (IsRegularIndex(ind[i]))
@@ -468,8 +466,8 @@ namespace ngla
   void BaseVector :: SetIndirect (FlatArray<int> ind, 
 				  FlatVector<double> v) 
   { 
-    FlatSysVector<double> lsv(Size(), EntrySize(), &FVDouble()(0));
-    FlatSysVector<double> sv(ind.Size(), EntrySize(), &v(0));
+    FlatSysVector<double> lsv(Size(), EntrySize(), FVDouble().Addr(0));
+    FlatSysVector<double> sv(ind.Size(), EntrySize(), v.Addr(0));
 
     for (size_t i = 0; i < ind.Size(); i++)
       if (IsRegularIndex(ind[i]))
@@ -548,7 +546,7 @@ namespace ngla
   {
     if (EntrySize() == 1)
       {
-        FlatVector<double> lsv(Size(), &FVDouble()(0));
+        FlatVector<double> lsv(Size(), FVDouble().Addr(0));
 
         if (!use_atomic)
           {
@@ -566,8 +564,8 @@ namespace ngla
       }
     else
       {
-        FlatSysVector<double> lsv(Size(), EntrySize(), &FVDouble()(0));
-        FlatSysVector<double> sv(ind.Size(), EntrySize(), &v(0));
+        FlatSysVector<double> lsv(Size(), EntrySize(), FVDouble().Addr(0));
+        FlatSysVector<double> sv(ind.Size(), EntrySize(), v.Addr(0));
         
         for (size_t i = 0; i < ind.Size(); i++)
           if (IsRegularIndex(ind[i]))
@@ -654,7 +652,7 @@ namespace ngla
     RegionTimer reg(t);
 
     if (conjugate)
-      return ngbla::InnerProduct (Conj(FVScal()), v2.FV<SCAL>());
+      return ngbla::InnerProduct (FVScal(), Conj(v2.FV<SCAL>()));
     else
       return ngbla::InnerProduct (FVScal(), v2.FV<SCAL>());
     // dynamic_cast<const S_BaseVector&>(v2).FVScal());
@@ -715,10 +713,10 @@ namespace ngla
   {
     FlatVector<Complex> fv = FVScal();
     return FlatVector<double> (fv.Size() * sizeof(Complex)/sizeof(double),
-                               reinterpret_cast<double*> (&fv(0)));
+                               reinterpret_cast<double*> (fv.Addr(0)));
   }
 
-
+  AutoVector :: ~AutoVector() { ; }
 
   BlockVector & dynamic_cast_BlockVector (BaseVector & x)
   {
@@ -741,23 +739,24 @@ namespace ngla
     size = 0;
     for (auto & vec:vecs)
       size += vec->Size();
-#ifdef PARALLEL
+    // #ifdef PARALLEL
     ispar.Clear();
+    for (size_t k = 0; k < vecs.Size(); k++)
+      if (vecs[k]->GetParallelStatus() != NOT_PARALLEL)
+        {
+          ispar.SetBit(k);
+          comm = dynamic_pointer_cast<ParallelBaseVector> (vecs[k])->GetParallelDofs()->GetCommunicator();
+        }
+    /*
     for (size_t k = 0; k<vecs.Size(); k++) {
       auto stat = vecs[k]->GetParallelStatus();
       if ( stat==NOT_PARALLEL ) continue;
       ispar.SetBit(k);
       auto * pv = dynamic_cast_ParallelBaseVector(vecs[k].get());
       comm = pv->GetParallelDofs()->GetCommunicator();
-      /*
-      auto vcomm = pv->GetParallelDofs()->GetCommunicator();
-      if (comm==MPI_COMM_NULL)
-	comm = vcomm;
-      else if (comm != vcomm)
-	throw Exception("Tried to construct a BlockVector with components in different MPI-Communicators!!");
-      */
     }
-#endif
+    */
+    // #endif
   }
 
   void * BlockVector :: Memory () const
@@ -782,7 +781,7 @@ namespace ngla
     Array<shared_ptr<BaseVector>> v2;
     for (auto & v : vecs)
       v2 += v->CreateVector();
-    return make_shared<BlockVector> (v2);
+    return make_unique<BlockVector> (v2);
   }
   
   double BlockVector :: InnerProductD (const BaseVector & v2) const
@@ -885,6 +884,7 @@ namespace ngla
     return *this;
   }
 
+
   BaseVector & BlockVector :: Add (Complex scal, const BaseVector & v)
   {
     auto & bv = dynamic_cast_BlockVector(v);
@@ -904,11 +904,11 @@ namespace ngla
   {
     switch (es)
       {
-      case 1: return make_shared<VVector<TSCAL>> (this->size);
-      case 2: return make_shared<VVector<Vec<2,TSCAL>>> (this->size);
-      case 3: return make_shared<VVector<Vec<3,TSCAL>>> (this->size);
+      case 1: return make_unique<VVector<TSCAL>> (this->size);
+      case 2: return make_unique<VVector<Vec<2,TSCAL>>> (this->size);
+      case 3: return make_unique<VVector<Vec<3,TSCAL>>> (this->size);
       }
-    return make_shared<S_BaseVectorPtr<TSCAL>> (this->size, es);
+    return make_unique<S_BaseVectorPtr<TSCAL>> (this->size, es);
   }
   
   template <typename TSCAL>
@@ -932,19 +932,297 @@ namespace ngla
   }
   
   
-
+  /*
   template <typename TSCAL>
   AutoVector S_BaseVectorPtr<TSCAL> :: Range (size_t begin, size_t end) const
   {
-    return make_shared<S_BaseVectorPtr<TSCAL>> (end-begin, es, pdata+begin*es);
+    return make_unique<S_BaseVectorPtr<TSCAL>> (end-begin, es, pdata+begin*es);
   }
+  */
   
   template <typename TSCAL>
   AutoVector S_BaseVectorPtr<TSCAL> :: Range (T_Range<size_t> range) const
   {
-    return make_shared<S_BaseVectorPtr<TSCAL>> (range.Size(), es, pdata+range.First()*es);
+    return make_unique<S_BaseVectorPtr<TSCAL>> (range.Size(), es, pdata+range.First()*es);
   }
 
+
+
+
+  class BaseVectorPtrMV : public MultiVector
+  {
+  public:
+    using MultiVector::MultiVector;
+
+    unique_ptr<MultiVector> Range(IntRange r) const override
+    {
+      auto mv2 = make_unique<BaseVectorPtrMV>(refvec, 0);
+      for (auto i : r)
+        mv2->vecs.Append (vecs[i]);
+      return mv2;
+    }
+
+    void SetScalar (double s) override
+    {
+      static Timer t("BaseVector-MV :: SetScalar");
+      RegionTimer reg(t);
+      
+      ParallelForRange
+        (refvec->FVDouble().Size(), [&] (IntRange myrange)
+         {
+           for (int i = 0; i < Size(); i++)
+             vecs[i]->FVDouble().Range(myrange) = s;
+         });
+    }
+
+    void Add (const MultiVector & v2, FlatMatrix<double> mat) override
+    {
+      static Timer t("BaseVector-MV :: mult mat");
+      RegionTimer reg(t);
+      t.AddFlops (mat.Height()*mat.Width()*this->RefVec()->FVDouble().Size());
+
+      size_t n = refvec->FVDouble().Size();
+
+      size_t BBH = 256;
+      size_t AH = 512;
+      size_t BH = 128;
+
+      ParallelFor(1 + n / BBH, [&] (int i) {
+
+        int i0 = BBH * i;
+        int is = min(BBH, n - i0);
+
+        // allocate memory for pointer arrays
+        STACK_ARRAY(double*, ppx, AH);
+        STACK_ARRAY(double*, ppy, BH);
+
+        for (int j0 = 0; j0 < Size(); j0 += AH) {
+          int js = min(AH, Size() - j0);
+
+          // get pointers of first multivector
+          for (int ell = 0; ell < js; ell++) {
+            ppx[ell] = (*this)[j0 + ell]->FVDouble().Addr(i0);
+          }
+
+            for (int k0 = 0; k0 < v2.Size(); k0+=BH) {
+              int ks = min(BH, v2.Size() - k0);
+
+              // get pointers of second multivector
+              for (int ell = 0; ell < ks; ell++) {
+                ppy[ell] = v2[k0 + ell]->FVDouble().Addr(i0);
+              }
+
+            MultiVectorAdd(is, FlatArray(js, ppx), FlatArray(ks, ppy), SliceMatrix(ks, js, mat.Width(), &mat(k0,j0)));
+          }
+
+        }
+
+      });
+
+    }
+
+
+    void Add (const MultiVector & v2, FlatMatrix<Complex> mat) override
+    {
+      static Timer t("BaseVector-MV :: mult mat complex");
+      RegionTimer reg(t);
+      t.AddFlops (4*mat.Height()*mat.Width()*this->RefVec()->FVComplex().Size());
+
+      size_t n = refvec->FVComplex().Size();
+
+      size_t BBH = 128;
+      size_t AH = 256;
+      size_t BH = 128;
+
+
+      ParallelFor(1 + n / BBH, [&] (int i) {
+
+        int i0 = BBH * i;
+        int is = min(BBH, n - i0);
+
+        // allocate memory for pointer arrays
+        STACK_ARRAY(Complex*, ppx, AH);
+        STACK_ARRAY(Complex*, ppy, BH);
+
+        for (int j0 = 0; j0 < Size(); j0 += AH) {
+          int js = min(AH, Size() - j0);
+
+          // get pointers of first multivector
+          for (int ell = 0; ell < js; ell++) {
+            ppx[ell] = (*this)[j0 + ell]->FVComplex().Addr(i0);
+          }
+
+          for (int k0 = 0; k0 < v2.Size(); k0+=BH) {
+            int ks = min(BH, v2.Size() - k0);
+
+            // get pointers of second multivector
+            for (int ell = 0; ell < ks; ell++) {
+              ppy[ell] = v2[k0 + ell]->FVComplex().Addr(i0);
+            }
+
+            MultiVectorAdd(is, FlatArray(js, ppx), FlatArray(ks, ppy), SliceMatrix(ks, js, mat.Width(), &mat(k0,j0)));
+
+          }
+
+        }
+
+      });
+
+    }
+
+
+    
+    Vector<> InnerProductD (const BaseVector & v2) const override
+    {
+      static Timer t("BaseVector-MV :: InnerProduct - vec");
+      t.AddFlops (Size()*this->RefVec()->FVDouble().Size());
+      RegionTimer reg(t);
+
+      Vector<> ip(Size());
+      ParallelFor (Size(), [&] (int nr)
+                   {
+                     ip(nr) = ngbla::InnerProduct ((*this)[nr]->FVDouble(), v2.FVDouble());
+                   });
+      return ip;
+    }
+
+    Matrix<> InnerProductD (const MultiVector & v2) const override
+    {
+      static Timer t("BaseVector-MultiVector::InnerProductD");
+      RegionTimer reg(t);
+      t.AddFlops (Size()*v2.Size()*this->RefVec()->FVDouble().Size());
+
+      size_t n = this->RefVec()->FVDouble().Size();
+
+      Matrix<double> res(Size(), v2.Size());
+      res = 0;
+
+      constexpr size_t BBH = 512;
+      constexpr size_t BH = 256;
+      constexpr size_t AH = 256;
+
+      ParallelFor ( 1 + n / BBH, [&] (int i) {
+
+        int i0 = BBH * i;
+        int is = min(BBH, n - i0);
+
+        STACK_ARRAY(double*, ppx, AH);
+        STACK_ARRAY(double*, ppy, BH);
+
+        for (int j0 = 0; j0 < Size(); j0 += AH) {
+          int js = min(AH, Size() - j0);
+
+          // store pointers to vectors of first multivector
+          for (int ell=0; ell < js; ell++) {
+            ppx[ell] = (*this)[j0 + ell]->FVDouble().Addr(i0);
+          }
+
+          for (int k0 = 0; k0 < v2.Size(); k0 += BH) {
+            int ks = min(BH, v2.Size() - k0);
+
+            // store pointers to vectors of second multivector
+            for(int ell=0; ell < ks; ell++) {
+              ppy[ell] = v2[k0 + ell]->FVDouble().Addr(i0);
+            }
+
+            // calculate result
+            Matrix<double> res_sub(js, ks);
+
+            ngbla::PairwiseInnerProduct(is, FlatArray(js, ppx), FlatArray(ks, ppy), res_sub);
+
+            // add the results to the matrix res
+            for (int ell_j = 0; ell_j < js; ell_j++) {
+              for (int ell_k = 0; ell_k < ks; ell_k++) {
+                AtomicAdd(res(j0 + ell_j, k0 + ell_k), res_sub(ell_j, ell_k));
+              }
+            }
+
+          }
+
+        }
+
+      });
+
+      return res;
+
+    }
+
+    Matrix<Complex> InnerProductC (const MultiVector & v2, bool conjugate) const override
+    {
+      static Timer t("BaseVector-MultiVector::InnerProductC");
+      RegionTimer reg(t);
+      t.AddFlops (4*Size()*v2.Size()*this->RefVec()->FVComplex().Size());
+
+      size_t n = this->RefVec()->FVComplex().Size();
+
+      Matrix<Complex> res(Size(), v2.Size());
+      res = 0. + 0i;
+
+      constexpr size_t BBH = 256;
+      constexpr size_t BH = 256;
+
+      // first multivector is split to avoid stack overflow when allocating ppx
+      constexpr size_t AH = 256;
+
+      ParallelFor ( 1 + n / BBH, [&] (int i) {
+
+        int i0 = BBH * i;
+        int is = min(BBH, n - i0);
+
+        STACK_ARRAY(Complex*, ppx, AH);
+        STACK_ARRAY(Complex*, ppy, BH);
+
+        for (int j0 = 0; j0 < Size(); j0 += AH) {
+          int js = min(AH, Size() - j0);
+
+          // store pointers to vectors of first multivector
+          for (int ell=0; ell < js; ell++) {
+            ppx[ell] = (*this)[j0 + ell]->FVComplex().Addr(i0);
+          }
+
+          for (int k0 = 0; k0 < v2.Size(); k0 += BH) {
+            int ks = min(BH, v2.Size() - k0);
+
+            // store pointers to vectors of second multivector
+            for(int ell=0; ell < ks; ell++) {
+              ppy[ell] = v2[k0 + ell]->FVComplex().Addr(i0);
+            }
+
+            // calculate result
+            Matrix<Complex> res_sub(js, ks);
+
+            ngbla::PairwiseInnerProduct(is, FlatArray(js, ppx), FlatArray(ks, ppy), res_sub, conjugate);
+
+            // add the results to the matrix res
+            for (int ell_j = 0; ell_j < js; ell_j++) {
+              for (int ell_k = 0; ell_k < ks; ell_k++) {
+                AtomicAdd(res(j0 + ell_j, k0 + ell_k), res_sub(ell_j, ell_k));
+              }
+            }
+
+          }
+
+        }
+
+      });
+
+
+      return res;
+    }
+
+
+  };
+
+  template <typename TSCAL>  
+  unique_ptr<MultiVector> S_BaseVectorPtr<TSCAL> ::
+    CreateMultiVector (size_t cnt) const 
+  {
+    return make_unique<BaseVectorPtrMV> (CreateVector(), cnt);
+  }
+  
+
+
+  
   template class S_BaseVector<double>;
   template class S_BaseVector<Complex>;
   

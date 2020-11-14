@@ -16,9 +16,9 @@ namespace ngla
 #ifdef PARALLEL
   
   template <typename TM> AutoVector MasterInverse<TM> :: CreateRowVector () const
-  { return make_shared<ParallelVVector<double>> (paralleldofs->GetNDofLocal(), paralleldofs); }
+  { return make_unique<ParallelVVector<double>> (paralleldofs->GetNDofLocal(), paralleldofs); }
   template <typename TM> AutoVector MasterInverse<TM> :: CreateColVector () const
-  { return make_shared<ParallelVVector<double>> (paralleldofs->GetNDofLocal(), paralleldofs); }
+  { return make_unique<ParallelVVector<double>> (paralleldofs->GetNDofLocal(), paralleldofs); }
   
   template <typename TM>
   MasterInverse<TM> :: MasterInverse (const SparseMatrixTM<TM> & mat, 
@@ -46,10 +46,7 @@ namespace ngla
     
 
     Array<int> first_master_dof(ntasks);
-    MPI_Allgather (&num_master_dofs, 1, MPI_INT, 
-		   &first_master_dof[0], 1, MPI_INT, 
-		   comm);
-
+    comm.AllGather (num_master_dofs, first_master_dof);
     
     int num_glob_dofs = 0;
     for (int i = 0; i < ntasks; i++)
@@ -278,7 +275,7 @@ namespace ngla
   {
     typedef typename mat_traits<TM>::TV_ROW TV;
     
-    NgsMPI_Comm comm = paralleldofs->GetCommunicator();
+    NgMPI_Comm comm = paralleldofs->GetCommunicator();
     int id = comm.Rank();
     int ntasks = comm.Size();
 
@@ -430,45 +427,64 @@ namespace ngla
     : ParallelMatrix(amat, apardofs, apardofs)
   { }
 
+
+  BaseMatrix::OperatorInfo ParallelMatrix :: GetOperatorInfo () const
+  {
+    OperatorInfo info;
+    info.name = "ParallelMatrix, optype = " + ToString(RowType(op)) + " --> " + ToString(ColType(op));
+    info.height = Height();
+    info.width = Width();
+    info.childs += mat.get();
+    return info;
+  }
+
   
   AutoVector ParallelMatrix :: CreateRowVector () const
   {
+    auto pd = row_paralleldofs ? row_paralleldofs : paralleldofs;
+    return CreateParallelVector (pd, RowType(op));
+    /*
     if (IsComplex()) {
       if (row_paralleldofs == nullptr)
-	return make_shared<S_ParallelBaseVectorPtr<Complex>>
+	return make_unique<S_ParallelBaseVectorPtr<Complex>>
 	  (mat->Width(), paralleldofs->GetEntrySize(), paralleldofs, DISTRIBUTED);
       else
-	return make_shared<S_ParallelBaseVectorPtr<Complex>>
+	return make_unique<S_ParallelBaseVectorPtr<Complex>>
 	  (mat->Width(), row_paralleldofs->GetEntrySize(), row_paralleldofs, DISTRIBUTED);
     }
     else {
       if (row_paralleldofs == nullptr)
-	return make_shared<S_ParallelBaseVectorPtr<double>>
+	return make_unique<S_ParallelBaseVectorPtr<double>>
 	  (mat->Width(), paralleldofs->GetEntrySize(), paralleldofs, DISTRIBUTED);
       else
-	return make_shared<S_ParallelBaseVectorPtr<double>>
+	return make_unique<S_ParallelBaseVectorPtr<double>>
 	  (mat->Width(), row_paralleldofs->GetEntrySize(), row_paralleldofs, DISTRIBUTED);
     }
+    */
   }
   
   AutoVector ParallelMatrix :: CreateColVector () const
   {
+    auto pd = col_paralleldofs ? col_paralleldofs : paralleldofs;
+    return CreateParallelVector (pd, ColType(op));
+    /*
     if (IsComplex()) {
       if (col_paralleldofs==nullptr)
-	return make_shared<S_ParallelBaseVectorPtr<Complex>>
+	return make_unique<S_ParallelBaseVectorPtr<Complex>>
 	  (mat->Height(), paralleldofs->GetEntrySize(), paralleldofs, DISTRIBUTED);
       else
-	return make_shared<S_ParallelBaseVectorPtr<Complex>>
+	return make_unique<S_ParallelBaseVectorPtr<Complex>>
 	  (mat->Height(), col_paralleldofs->GetEntrySize(), col_paralleldofs, DISTRIBUTED);
     }
     else {
       if (col_paralleldofs==nullptr)
-	return make_shared<S_ParallelBaseVectorPtr<double>>
+	return make_unique<S_ParallelBaseVectorPtr<double>>
 	  (mat->Height(), paralleldofs->GetEntrySize(), paralleldofs, DISTRIBUTED);
       else
-	return make_shared<S_ParallelBaseVectorPtr<double>>
+	return make_unique<S_ParallelBaseVectorPtr<double>>
 	  (mat->Height(), col_paralleldofs->GetEntrySize(), col_paralleldofs, DISTRIBUTED);
     }
+    */
   }
 
 
@@ -490,6 +506,49 @@ namespace ngla
     else
       y.Distribute();
     mat->MultAdd (s, *xpar.GetLocalVector(), *ypar.GetLocalVector());
+  
+    /*
+    auto xpar = dynamic_cast<const ParallelBaseVector*> (&x);
+    auto ypar = dynamic_cast<ParallelBaseVector*> (&y);
+
+    const BaseVector * localx = &x;
+    if (xpar)
+      {
+        if (RowType(op) == CUMULATED && xpar->GetParallelStatus() != CUMULATED)
+          {
+            cout << "WARNING: ParallelMatrix::MultAdd, x needs cumulation" << endl;
+            xpar->Cumulate();
+          }
+        if (RowType(op) == DISTRIBUTED && xpar->GetParallelStatus() != DISTRIBUTED)
+          {
+            cout << "WARNING: ParallelMatrix::MultAdd, x needs distribution" << endl;        
+            xpar->Distribute();
+          }
+        localx = xpar->GetLocalVector().get();
+      }
+    else
+      cout << "WARNING: ParallelMatrix::MultAdd, x not parallel" << endl;
+
+    BaseVector * localy = &y;
+    if (ypar)
+      {
+        if (ColType(op) == CUMULATED && ypar->GetParallelStatus() != CUMULATED)
+          {
+            cout << "WARNING: ParallelMatrix::MultAdd, y needs cumulation" << endl;
+            ypar->Cumulate();
+          }
+        if (ColType(op) == DISTRIBUTED && ypar->GetParallelStatus() != DISTRIBUTED)
+          {
+            cout << "WARNING: ParallelMatrix::MultAdd, y needs distribution" << endl;        
+            ypar->Distribute();
+          }
+        localy = ypar->GetLocalVector().get();
+      }
+    else
+      cout << "WARNING: ParallelMatrix::MultAdd, y not parallel" << endl;
+    
+    mat->MultAdd (s, *localx, *localy);
+    */
   }
 
   void ParallelMatrix :: MultTransAdd (double s, const BaseVector & x, BaseVector & y) const
@@ -518,11 +577,11 @@ namespace ngla
       throw Exception("ParallelMatrix::CreateVector called for nonsymmetric case (use CreateRowVector of CreateColVector)!");
     }
     if (IsComplex()) {
-      return make_shared<S_ParallelBaseVectorPtr<Complex>>
+      return make_unique<S_ParallelBaseVectorPtr<Complex>>
 	(mat->Width(), paralleldofs->GetEntrySize(), paralleldofs, DISTRIBUTED);
     }
     else {
-      return make_shared<S_ParallelBaseVectorPtr<double>>
+      return make_unique<S_ParallelBaseVectorPtr<double>>
 	(mat->Width(), paralleldofs->GetEntrySize(), paralleldofs, DISTRIBUTED);
     }
   }
@@ -611,6 +670,93 @@ namespace ngla
   }
 
 
+  CumulationOperator :: ~CumulationOperator() { } 
+  
+  void CumulationOperator :: Mult (const BaseVector & x, BaseVector & y) const
+  {
+    if (pardofs->GetCommunicator().Size() == 1)
+      {
+        y = x;
+        return;
+      }
+    
+    if (x.GetParallelStatus() != DISTRIBUTED)
+      throw Exception ("CumulationOperator::Mult called, but x is not distributed");
+    if (y.GetParallelStatus() != CUMULATED)
+      throw Exception ("CumulationOperator::Mult called, but y is not distributed");
+
+    dynamic_cast<ParallelBaseVector&> (y).SetStatus(DISTRIBUTED);
+    y = x;
+    y.Cumulate();
+  }
+
+  void CumulationOperator :: MultAdd (double s, const BaseVector & x, BaseVector & y) const
+  {
+    if (pardofs->GetCommunicator().Size() == 1)
+      {
+        y += s * x;
+        return;
+      }
+    
+    if (x.GetParallelStatus() != DISTRIBUTED)
+      throw Exception ("CumulationOperator::MultAdd called, but x is not distributed");
+    if (y.GetParallelStatus() != CUMULATED)
+      throw Exception ("CumulationOperator::MultAdd called, but y is not distributed");
+
+    y.Distribute();
+    y += s*x;
+    y.Cumulate();
+  }
+  
+  void CumulationOperator :: MultTrans (const BaseVector & x, BaseVector & y) const
+  {
+    Mult (x, y);
+    // throw Exception ("CumulationOp, multtrans not implemented");
+  }
+  
+  void CumulationOperator :: MultTransAdd (double s, const BaseVector & x, BaseVector & y) const
+  {
+    MultAdd (s, x, y);
+    // throw Exception ("CumulationOp, multtransadd not implemented");
+  }
+
+  AutoVector CumulationOperator :: CreateRowVector () const
+  {
+    return CreateParallelVector(pardofs, DISTRIBUTED);
+  }
+  
+  AutoVector CumulationOperator :: CreateColVector () const
+  {
+    return CreateParallelVector(pardofs, CUMULATED);    
+  }
+
+  int CumulationOperator :: VHeight() const
+  {
+    return pardofs->GetNDofLocal();
+  }
+  
+  int CumulationOperator :: VWidth() const 
+  {
+    return pardofs->GetNDofLocal();
+  }
+
+
+  ostream & CumulationOperator :: Print (ostream & ost) const
+  {
+    ost << "CumulationOperator" << endl;
+    return ost;
+  }
+
+
+
+
+
+
+
+
+
+
+  
 
 #ifdef PARALLEL
 
@@ -692,15 +838,15 @@ namespace ngla
   {
     // throw Exception("Called FETI_Jump_Matrix :: CreateRowVector, this is not well defined");
     if (u_paralleldofs==nullptr) {
-      return make_shared<VVector<double>>(VHeight());
+      return make_unique<VVector<double>>(VHeight());
     }
-    return make_shared<ParallelVVector<double>> (u_paralleldofs->GetNDofLocal(),
+    return make_unique<ParallelVVector<double>> (u_paralleldofs->GetNDofLocal(),
 						 u_paralleldofs);
   }
   
   AutoVector FETI_Jump_Matrix :: CreateColVector () const
   {
-    return make_shared<ParallelVVector<double>> (jump_paralleldofs->GetNDofLocal(),
+    return make_unique<ParallelVVector<double>> (jump_paralleldofs->GetNDofLocal(),
 						 jump_paralleldofs);
   }
   

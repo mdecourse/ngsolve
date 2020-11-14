@@ -1,19 +1,28 @@
-// #define GL_SILENCE_DEPRECATION 
-// #include <GL/gl.h>
-// #include <OpenGL/gl.h>
-// #include <incopengl.hpp>
+#include <netgen_config.hpp>
 
 #include "contact.hpp"
 
-// namespace netgen
-// {
-//   extern void AddUserVisualizationObject (UserVisualizationObject * vis);
-//   extern void DeleteUserVisualizationObject (UserVisualizationObject * vis);
-// }
+#if NETGEN_USE_GUI
+#include <incopengl.hpp>
+
+namespace netgen
+{
+  DLL_HEADER void AddUserVisualizationObject (UserVisualizationObject * vis);
+  DLL_HEADER void DeleteUserVisualizationObject (UserVisualizationObject * vis);
+}
+#endif // NETGEN_USE_GUI
 
 
 namespace ngcomp
 {
+  inline int GetDomIn(const MeshAccess& ma, const Ngs_Element& el)
+  {
+    if(ma.GetDimension() ==3)
+      return ma.GetNetgenMesh()->GetFaceDescriptor(el.GetIndex()+1).DomainIn();
+    else
+      return ma.GetNetgenMesh()->LineSegments()[el.Nr()].domin;
+  }
+
   // Quadratic approximation of distance to pmaster
   template<int DIM>
   struct T2
@@ -166,6 +175,7 @@ namespace ngcomp
     const auto & el1 = ma->GetElement(trafo1.GetElementId());
     auto & trafo1_def = trafo1.AddDeformation(displacement.get(), lh);
     const auto & mip1_def = static_cast<const MappedIntegrationPoint<DIM-1, DIM>&>(trafo1_def(ip1, lh));
+    double inv_fac = GetDomIn(*ma, el1) == 0 ? -1. : 1.;
 
     const auto & p1 = mip1_def.GetPoint();
 
@@ -191,20 +201,14 @@ namespace ngcomp
        {
          auto el2 = ma->GetElement(ElementId(BND, elnr2));
          HeapReset hr(lh);
-
-         bool common_vertex = false;
-         for (auto s_v : el1.Vertices() )
-           for (auto v : el2.Vertices() )
-             if(s_v==v)
-               common_vertex = true;
-         if (common_vertex) return false;
+         double inv_fac2 = GetDomIn(*ma, el2) == 0 ? -1. : 1.;
 
          auto & trafo2 = ma->GetTrafo(el2, lh);
          auto & trafo2_def = trafo2.AddDeformation(displacement.get(), lh);
 
          IntegrationPoint ip2;
          Vec<DIM> p2;
-         double dist = FindClosestPoint<DIM-1,DIM>(p1, mip1_def.GetNV(), mindist, trafo2_def, ip2, p2 );
+         double dist = FindClosestPoint<DIM-1,DIM>(p1, inv_fac * inv_fac2 * mip1_def.GetNV(), mindist, trafo2_def, ip2, p2 );
          if(dist<mindist && dist < h)
          {
            mindist = dist;
@@ -306,6 +310,8 @@ namespace ngcomp
 
     auto & trafo1_def = trafo1.AddDeformation(displacement.get(), lh);
 
+    double inv_fac = GetDomIn(*ma, el1) == 0 ? -1. : 1.;
+
     auto & ip1 = ip.IP();
     Vec<DIM> p1;
     trafo1_def.CalcPoint(ip1, p1);
@@ -327,6 +333,7 @@ namespace ngcomp
        [&] (int elnr2)
        {
          auto el2 = ma->GetElement( ElementId (BND, elnr2) );
+         double inv_fac2 = GetDomIn(*ma, el2) == 0 ? -1. : 1.;
          HeapReset hr(lh);
 
          bool common_vertex = false;
@@ -340,7 +347,7 @@ namespace ngcomp
 
          Vec<DIM> p2;
          IntegrationPoint ip2;
-         double dist = FindClosestPoint<DIM-1,DIM>(p1, mip.GetNV(), mindist, trafo2_def, ip2, p2 );
+         double dist = FindClosestPoint<DIM-1,DIM>(p1, inv_fac * inv_fac2 * mip.GetNV(), mindist, trafo2_def, ip2, p2 );
          if(dist<mindist && dist < h)
          {
            mindist = dist;
@@ -365,23 +372,27 @@ namespace ngcomp
   template<int DIM>
   void DisplacedNormal<DIM>::Evaluate(const BaseMappedIntegrationPoint& ip, FlatVector<> values) const
   {
+    auto ma = displacement->GetMeshAccess();
+    const auto& el = ma->GetElement(ip.GetTransformation().GetElementId());
+    double inv_fac = GetDomIn(*ma, el) == 0 ? -1. : 1.;
+
     if(!displacement)
       {
-        values = static_cast<const MappedIntegrationPoint<DIM-1, DIM>&>(ip).GetNV();
+        values = inv_fac * static_cast<const MappedIntegrationPoint<DIM-1, DIM>&>(ip).GetNV();
         return;
       }
     LocalHeapMem<10000> lh("deformednormal");
     auto& trafo_def = ip.GetTransformation().AddDeformation(displacement.get(), lh);
     auto& mip_def = static_cast<const MappedIntegrationPoint<DIM-1, DIM>&>(trafo_def(ip.IP(), lh));
-    values = mip_def.GetNV();
+    values = inv_fac * mip_def.GetNV();
   }
 
   template class DisplacedNormal<2>;
   template class DisplacedNormal<3>;
 
   ContactEnergy::ContactEnergy(shared_ptr<CoefficientFunction> _cf,
-                               shared_ptr<FESpace> _fes)
-    : cf(_cf), fes(_fes)
+                               bool _deformed)
+    : cf(_cf), deformed(_deformed)
   {
     cf->TraverseTree
       ([&](CoefficientFunction& nodecf)
@@ -390,6 +401,7 @@ namespace ngcomp
          if (proxy && !proxy->IsTestFunction() && !trial_proxies.Contains(proxy))
            trial_proxies.Append(proxy);
        });
+    fes = trial_proxies[0]->GetFESpace();
   }
 
   double ContactEnergy::CalcEnergy(const FiniteElement& m_fel,
@@ -595,8 +607,8 @@ namespace ngcomp
   }
 
   ContactIntegrator::ContactIntegrator(shared_ptr<CoefficientFunction> _cf,
-                                       shared_ptr<FESpace> _fes)
-    : cf(_cf), fes(_fes)
+                                       bool _deformed)
+    : cf(_cf), deformed(_deformed)
   {
     cf->TraverseTree
       ([&](CoefficientFunction& nodecf)
@@ -608,6 +620,7 @@ namespace ngcomp
          if(proxy && proxy->IsTestFunction() && !test_proxies.Contains(proxy))
            test_proxies.Append(proxy);
        });
+    fes = trial_proxies[0]->GetFESpace();
   }
 
   void ContactIntegrator::ApplyAdd(const FiniteElement& m_fel,
@@ -753,13 +766,16 @@ namespace ngcomp
         }
   }
 
-  ContactBoundary::ContactBoundary(shared_ptr<FESpace> _fes,
-                                   Region _master, Region _other, bool draw_pairs_)
-    : master(_master), other(_other), fes(_fes), draw_pairs(draw_pairs_)
+  ContactBoundary::ContactBoundary(Region _master, Region _other,
+                                   bool _draw_pairs)
+    : master(_master), other(_other), draw_pairs(_draw_pairs)
   {
-//     if(draw_pairs)
-//       AddUserVisualizationObject (this);
-    auto mesh = fes->GetMeshAccess();
+#if NETGEN_USE_GUI
+    if(draw_pairs)
+      AddUserVisualizationObject (this);
+#endif // NETGEN_USE_GUI
+
+    auto mesh = master.Mesh();
     if(mesh->GetDimension() == 2)
       {
         gap = make_shared<T_GapFunction<2>>(mesh, master, other);
@@ -774,7 +790,9 @@ namespace ngcomp
 
   ContactBoundary :: ~ContactBoundary()
   {
-//     DeleteUserVisualizationObject (this);
+#if NETGEN_USE_GUI
+    DeleteUserVisualizationObject (this);
+#endif // NETGEN_USE_GUI
   }
 
   void ContactBoundary :: Draw()
@@ -782,7 +800,7 @@ namespace ngcomp
     if(!draw_pairs)
       return;
 
-    /*
+#if NETGEN_USE_GUI
     glBegin (GL_LINES);
     for (auto i : Range(master_points.Size()))
       {
@@ -792,23 +810,36 @@ namespace ngcomp
         glVertex3d (sp(0), sp(1), sp(2));
       }
     glEnd();
-    */
+#endif // NETGEN_USE_GUI
   }
 
-  void ContactBoundary::AddEnergy(shared_ptr<CoefficientFunction> form)
+  void ContactBoundary::AddEnergy(shared_ptr<CoefficientFunction> form,
+                                  bool deformed)
   {
-    energies.Append(make_shared<ContactEnergy>(form, fes));
+    energies.Append(make_shared<ContactEnergy>(form, deformed));
   }
 
-  void ContactBoundary::AddIntegrator(shared_ptr<CoefficientFunction> form)
+  void ContactBoundary::AddIntegrator(shared_ptr<CoefficientFunction> form,
+                                      bool deformed)
   {
-    integrators.Append(make_shared<ContactIntegrator>(form, fes));
+    integrators.Append(make_shared<ContactIntegrator>(form, deformed));
   }
 
   void ContactBoundary::Update(shared_ptr<GridFunction> displacement_,
                                shared_ptr<BilinearForm> bf,
                                int intorder, double h)
   {
+    if(!fes)
+      {
+        if(bf)
+          fes = bf->GetFESpace();
+        else
+          fes = displacement_->GetFESpace();
+      }
+    if(bf && (bf->GetFESpace().get() != fes.get()))
+      throw Exception("BilinearForm on different space as given to ContactBoundary!");
+    fes_displacement = displacement_->GetFESpace();
+
     if(draw_pairs)
     {
       other_points.SetSize(0);
@@ -865,7 +896,7 @@ namespace ngcomp
                           if(pair.has_value())
                             {
                               lock_guard<mutex> guard(add_mutex);
-                              bf->AddSpecialElement(make_unique<ContactElement<DIM>>(*pair, this));
+                              bf->AddSpecialElement(make_unique<ContactElement<DIM>>(*pair, this, displacement.get()));
                               if(draw_pairs)
                               {
                                 HeapReset hr(lh);
@@ -890,8 +921,9 @@ namespace ngcomp
 
   template<int DIM>
   ContactElement<DIM>::ContactElement(const ContactPair<DIM>& _pair,
-                                      ContactBoundary* _cb)
-    : pair(_pair), cb(_cb), fes(_cb->GetFESpace().get())
+                                      ContactBoundary* _cb,
+                                      GridFunction* _deformation)
+    : pair(_pair), cb(_cb), fes(_cb->GetFESpace().get()), deformation(_deformation)
   {
   }
 
@@ -923,9 +955,29 @@ namespace ngcomp
               auto& s_fel = fes->GetFE(pair.other_el, lh);
               const_cast<BaseMappedIntegrationRule&>(m_mir).SetOtherMIR(&s_mir);
               for(const auto& ce : cb->GetEnergies())
-                energy += ce->CalcEnergy(fel, s_fel, m_mir, elx, lh);
+                if(!ce->IsDeformed())
+                  energy += ce->CalcEnergy(fel, s_fel, m_mir, elx, lh);
             });
        });
+
+    m_trafo.AddDeformation(deformation, lh);
+    m_trafo(pair.master_ip, lh).IntegrationRuleFromPoint
+      ([&](const BaseMappedIntegrationRule& m_mir)
+       {
+         auto& s_trafo = fes->GetMeshAccess()->GetTrafo(pair.other_el, lh);
+         s_trafo.AddDeformation(deformation, lh);
+         s_trafo(pair.other_ip, lh).IntegrationRuleFromPoint
+           ([&](const BaseMappedIntegrationRule& s_mir)
+            {
+              auto& fel = fes->GetFE(pair.master_el, lh);
+              auto& s_fel = fes->GetFE(pair.other_el, lh);
+              const_cast<BaseMappedIntegrationRule&>(m_mir).SetOtherMIR(&s_mir);
+              for(const auto& ce : cb->GetEnergies())
+                if(ce->IsDeformed())
+                  energy += ce->CalcEnergy(fel, s_fel, m_mir, elx, lh);
+            });
+       });
+
     return energy;
   }
 
@@ -947,9 +999,32 @@ namespace ngcomp
               auto& s_fel = fes->GetFE(pair.other_el, lh);
               const_cast<BaseMappedIntegrationRule&>(m_mir).SetOtherMIR(&s_mir);
               for(const auto& ce : cb->GetEnergies())
-                ce->ApplyAdd(fel, s_fel, m_mir, elx, ely, lh);
+                if(!ce->IsDeformed())
+                  ce->ApplyAdd(fel, s_fel, m_mir, elx, ely, lh);
               for(const auto& ci : cb->GetIntegrators())
-                ci->ApplyAdd(fel, s_fel, m_mir, elx, ely, lh);
+                if(!ci->IsDeformed())
+                  ci->ApplyAdd(fel, s_fel, m_mir, elx, ely, lh);
+            });
+       });
+
+    m_trafo.AddDeformation(deformation, lh);
+    m_trafo(pair.master_ip, lh).IntegrationRuleFromPoint
+      ([&](const BaseMappedIntegrationRule& m_mir)
+       {
+         auto& s_trafo = fes->GetMeshAccess()->GetTrafo(pair.other_el, lh);
+         s_trafo.AddDeformation(deformation, lh);
+         s_trafo(pair.other_ip, lh).IntegrationRuleFromPoint
+           ([&](const BaseMappedIntegrationRule& s_mir)
+            {
+              auto& fel = fes->GetFE(pair.master_el, lh);
+              auto& s_fel = fes->GetFE(pair.other_el, lh);
+              const_cast<BaseMappedIntegrationRule&>(m_mir).SetOtherMIR(&s_mir);
+              for(const auto& ce : cb->GetEnergies())
+                if(ce->IsDeformed())
+                  ce->ApplyAdd(fel, s_fel, m_mir, elx, ely, lh);
+              for(const auto& ci : cb->GetIntegrators())
+                if(ci->IsDeformed())
+                  ci->ApplyAdd(fel, s_fel, m_mir, elx, ely, lh);
             });
        });
   }
@@ -972,11 +1047,35 @@ namespace ngcomp
               auto& s_fel = fes->GetFE(pair.other_el, lh);
               const_cast<BaseMappedIntegrationRule&>(m_mir).SetOtherMIR(&s_mir);
               for(const auto& ce : cb->GetEnergies())
-                ce->CalcLinearizedAdd(fel, s_fel, m_mir, elx, elmat, lh);
+                if(!ce->IsDeformed())
+                  ce->CalcLinearizedAdd(fel, s_fel, m_mir, elx, elmat, lh);
               for(const auto& ci : cb->GetIntegrators())
-                ci->CalcLinearizedAdd(fel, s_fel, m_mir, elx, elmat, lh);
+                if(!ci->IsDeformed())
+                  ci->CalcLinearizedAdd(fel, s_fel, m_mir, elx, elmat, lh);
             });
        });
+
+    m_trafo.AddDeformation(deformation, lh);
+    m_trafo(pair.master_ip, lh).IntegrationRuleFromPoint
+      ([&](const BaseMappedIntegrationRule& m_mir)
+       {
+         auto& s_trafo = fes->GetMeshAccess()->GetTrafo(pair.other_el, lh);
+         s_trafo.AddDeformation(deformation, lh);
+         s_trafo(pair.other_ip, lh).IntegrationRuleFromPoint
+           ([&](const BaseMappedIntegrationRule& s_mir)
+            {
+              auto& fel = fes->GetFE(pair.master_el, lh);
+              auto& s_fel = fes->GetFE(pair.other_el, lh);
+              const_cast<BaseMappedIntegrationRule&>(m_mir).SetOtherMIR(&s_mir);
+              for(const auto& ce : cb->GetEnergies())
+                if(ce->IsDeformed())
+                  ce->CalcLinearizedAdd(fel, s_fel, m_mir, elx, elmat, lh);
+              for(const auto& ci : cb->GetIntegrators())
+                if(ci->IsDeformed())
+                  ci->CalcLinearizedAdd(fel, s_fel, m_mir, elx, elmat, lh);
+            });
+       });
+
   }
 
   template class ContactElement<2>;

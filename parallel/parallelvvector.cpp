@@ -8,6 +8,110 @@
 namespace ngla
 {
 
+  class ParallelRangeVector : public ParallelBaseVector
+  {
+  protected:
+    const ParallelBaseVector * orig;
+    IntRange range;
+  public:
+    ParallelRangeVector (const ParallelBaseVector * aorig, IntRange arange)
+      : BaseVector(), ParallelBaseVector(), orig(aorig), range(arange)
+    {
+      BaseVector::entrysize = aorig->EntrySize();
+      this->size = range.Size();
+      status = orig->GetParallelStatus();
+      local_vec = orig->GetLocalVector()->Range(range);
+    }
+    
+    ~ParallelRangeVector () override { ; }
+
+    void * Memory () const override
+    { return orig->GetLocalVector()->Range(range).Memory(); }
+
+    virtual bool IsComplex() const override
+    { return orig->IsComplex(); } 
+    
+    FlatVector<double> FVDouble () const override
+    { return orig->GetLocalVector()->Range(range).FVDouble(); }
+
+    FlatVector<Complex> FVComplex () const override
+    { return orig->GetLocalVector()->Range(range).FVComplex(); }
+
+    AutoVector Range (T_Range<size_t> range2) const override
+    {
+      T_Range<size_t> totrange(range.First()+range2.First(), range.First()+range2.Next());
+      return make_unique<ParallelRangeVector> (orig, totrange);
+    }
+    
+    AutoVector CreateVector () const override
+    {
+      cout << "CreateVector" << endl;
+      throw Exception("CreateVector not avail");
+    }
+    
+    void GetIndirect (FlatArray<int> ind, 
+                      FlatVector<double> v) const override
+    {
+      local_vec -> GetIndirect (ind, v);
+    }
+    void GetIndirect (FlatArray<int> ind, 
+                      FlatVector<Complex> v) const override
+    {
+      local_vec -> GetIndirect (ind, v);
+    }
+
+    void Cumulate () const override
+    {
+      orig->Cumulate();
+      status = CUMULATED;
+    }
+
+    void Distribute() const override
+    {
+      orig->Distribute();
+      status = DISTRIBUTED;
+    }
+    
+    PARALLEL_STATUS GetParallelStatus () const override
+    {
+
+      return orig->GetParallelStatus();
+    }
+    
+    virtual void SetParallelStatus (PARALLEL_STATUS stat) const override
+    {
+      if (stat != status)
+        {
+          cout << "setparallel, should changed from " << status << " to " << stat << endl;
+          throw Exception("SetParallelStatus of rangevec called, change from"
+                          +ToString(status) + " to " +ToString(stat));
+        }
+    }
+
+    virtual void SetParallelDofs (shared_ptr<ParallelDofs> aparalleldofs) override
+    {
+      if (Size() != aparalleldofs->GetNDofLocal())
+        throw Exception("SetParallelDofs of rangevec called, wrong sizes");
+      paralleldofs = aparalleldofs;
+    }
+
+
+    void IRecvVec ( int dest, MPI_Request & request ) override
+    {
+      cout << "irecvec, and throw" << endl;
+      throw Exception("ParallelRangeVector, don't know how to IRecVec");
+    }
+    
+    void AddRecvValues( int sender ) override
+    {
+      cout << "addvecrec, and throw" << endl;
+      throw Exception("ParallelRangeVector, don't know how to IRecVec");
+    }
+    
+  };
+
+
+  
   BaseVector & ParallelBaseVector :: SetScalar (double scal)
   {
     if (IsComplex())
@@ -31,6 +135,11 @@ namespace ngla
     return *this;
   }
 
+  void ParallelBaseVector :: SetZero ()
+  {
+    local_vec->SetZero();
+  }
+  
   BaseVector & ParallelBaseVector :: Set (double scal, const BaseVector & v)
   {
     FVDouble() = scal * v.FVDouble();
@@ -65,6 +174,7 @@ namespace ngla
     
   BaseVector & ParallelBaseVector :: Add (double scal, const BaseVector & v)
   {
+    static Timer t("ParallelVector::Add"); RegionTimer reg(t);
     const ParallelBaseVector * parv = dynamic_cast_ParallelBaseVector (&v);
 
     if ( (*this).Status() != parv->Status() )
@@ -108,6 +218,9 @@ namespace ngla
 
   void ParallelBaseVector :: Cumulate () const
   {
+    static Timer t("ParallelVector - Cumulate");
+    RegionTimer reg(t);
+    
 #ifdef PARALLEL
     if (status != DISTRIBUTED) return;
     
@@ -140,13 +253,14 @@ namespace ngla
     SetStatus(CUMULATED);
 #endif
   }
+  
 
 
 
   void ParallelBaseVector :: ISend ( int dest, MPI_Request & request ) const
   {
 #ifdef PARALLEL
-    MPI_Datatype mpi_t = this->paralleldofs->MyGetMPI_Type(dest);
+    MPI_Datatype mpi_t = this->paralleldofs->GetMPI_Type(dest);
     MPI_Isend( Memory(), 1, mpi_t, dest, MPI_TAG_SOLVE, this->paralleldofs->GetCommunicator(), &request);
 #endif
   }
@@ -166,6 +280,9 @@ namespace ngla
   template <class SCAL>
   SCAL S_ParallelBaseVector<SCAL> :: InnerProduct (const BaseVector & v2, bool conjugate) const
   {
+    static Timer t("ParallelVector - InnerProduct");
+    RegionTimer reg(t);
+    
     const ParallelBaseVector * parv2 = dynamic_cast_ParallelBaseVector(&v2);
 
     // two distributed vectors -- cumulate one
@@ -174,7 +291,23 @@ namespace ngla
     
     // two cumulated vectors -- distribute one
     else if ( this->Status() == parv2->Status() && this->Status() == CUMULATED )
-      Distribute();
+      {
+        // both cumulated
+        if (this->EntrySize() == 1)
+          {
+            static Timer t("masked ip"); RegionTimer reg(t);
+            FlatVector<> me = this->FVDouble();
+            FlatVector<> you = parv2->FVDouble();
+            const BitArray & ba = paralleldofs->MasterDofs();
+            double sum = 0;
+            for (size_t i = 0; i < me.Size(); i++)
+              if (ba.Test(i))
+                sum += me(i) * you(i);
+            return paralleldofs->GetCommunicator().AllReduce (sum, MPI_SUM);            
+          }
+
+        Distribute();
+      }
     
     SCAL localsum = ngbla::InnerProduct (this->FVScal(), 
 					 dynamic_cast<const S_BaseVector<SCAL>&>(*parv2).FVScal());
@@ -249,6 +382,30 @@ namespace ngla
     local_vec = make_shared<S_BaseVectorPtr<SCAL>>(as, aes, (void*)pdata);
   }
 
+
+  template <class SCAL>
+  S_ParallelBaseVectorPtr<SCAL> :: 
+  S_ParallelBaseVectorPtr (int as, int aes, void * adata,
+			   shared_ptr<ParallelDofs> apd, PARALLEL_STATUS stat) throw()
+    : S_BaseVectorPtr<SCAL> (as, aes, adata)
+  { 
+    recvvalues = NULL;
+    if ( apd != 0 )
+      {
+	this -> SetParallelDofs ( apd );
+	status = stat;
+      }
+    else
+      {
+	paralleldofs = 0;
+	status = NOT_PARALLEL;
+      }
+    local_vec = make_shared<S_BaseVectorPtr<SCAL>>(as, aes, (void*)pdata);
+  }
+
+
+
+
   template <class SCAL>
   S_ParallelBaseVectorPtr<SCAL> :: ~S_ParallelBaseVectorPtr ()
   {
@@ -258,7 +415,7 @@ namespace ngla
 
   template <typename SCAL>
   void S_ParallelBaseVectorPtr<SCAL> :: 
-  SetParallelDofs (shared_ptr<ParallelDofs> aparalleldofs, const Array<int> * procs )
+  SetParallelDofs (shared_ptr<ParallelDofs> aparalleldofs) // , const Array<int> * procs )
   {
     if (this->paralleldofs == aparalleldofs) return;
 
@@ -276,13 +433,6 @@ namespace ngla
     auto dps = paralleldofs->GetDistantProcs();
     this->sreqs.SetSize(dps.Size());
     this->rreqs.SetSize(dps.Size());
-    // for (auto k : Range(dps)) {
-    //   auto p = dps[k];
-    //   MPI_Datatype mpi_t = this->paralleldofs->MyGetMPI_Type(p);
-    //   MPI_Send_init( this->Memory(), 1, mpi_t, p, MPI_TAG_SOLVE, this->paralleldofs->GetCommunicator(), &sreqs[k]);
-    //   MPI_Recv_init( &( (*recvvalues)[p][0]), (*recvvalues)[p].Size(), MyGetMPIType<TSCAL> (),
-    // 		     p, MPI_TAG_SOLVE, this->paralleldofs->GetCommunicator(), &rreqs[k]);
-    // }
   }
 
 
@@ -320,12 +470,58 @@ namespace ngla
     return ost;
   }
 
+  template < class SCAL >  
+  AutoVector S_ParallelBaseVectorPtr<SCAL> :: Range (T_Range<size_t> range) const
+  {
+    /*
+      Version 1: 
+      A ParallelFlatVector
+      + possible to cumulate / distribue by its own (???)
+      - requies Range of pardofs, expensive ? 
+      .... will provide method   Range (range, pardofs)
+     */
 
+    shared_ptr<ParallelDofs> sub_pardofs;
+    if (paralleldofs)
+      sub_pardofs = paralleldofs->Range(range);
+    
+    AutoVector locvec = S_BaseVectorPtr<SCAL>::Range (range);
+    auto vec = make_unique<S_ParallelBaseVectorPtr<SCAL>> (range.Size(), this->EntrySize(),
+                                                           locvec.Memory(), 
+                                                           sub_pardofs,
+                                                           this->GetParallelStatus());
+
+    return move(vec);
+
+    /*
+      Version 2:
+      Has pointer to original vector + Range
+      - cumulate/distribute acts on original vector -> expensive
+     */
+    
+    // return make_unique<ParallelRangeVector> (this, range);
+  }
+
+
+  template < class SCAL >  
+  AutoVector S_ParallelBaseVectorPtr<SCAL> :: Range (DofRange range) const
+  {
+    AutoVector locvec = S_BaseVectorPtr<SCAL>::Range (range);
+    auto vec = make_unique<S_ParallelBaseVectorPtr<SCAL>> (range.Size(), this->EntrySize(),
+                                                           locvec.Memory(), 
+                                                           range.GetParallelDofs(),
+                                                           this->GetParallelStatus());
+    return move(vec);
+  }
+
+
+
+  
   template <typename SCAL>
   void S_ParallelBaseVectorPtr<SCAL> :: IRecvVec ( int dest, MPI_Request & request )
   {
 #ifdef PARALLEL
-    MPI_Datatype MPI_TS = MyGetMPIType<TSCAL> ();
+    MPI_Datatype MPI_TS = GetMPIType<TSCAL> ();
     MPI_Irecv( &( (*recvvalues)[dest][0]), 
 	       (*recvvalues)[dest].Size(), 
 	       MPI_TS, dest, 
@@ -363,7 +559,7 @@ namespace ngla
   AutoVector S_ParallelBaseVectorPtr<SCAL> :: 
   CreateVector () const
   {
-    return make_shared<S_ParallelBaseVectorPtr<TSCAL>>
+    return make_unique<S_ParallelBaseVectorPtr<TSCAL>>
       (this->size, this->es, paralleldofs, status);
     /*
     S_ParallelBaseVectorPtr<TSCAL> * parvec = 
@@ -403,6 +599,23 @@ namespace ngla
   }
 
 
+  AutoVector CreateParallelVector (shared_ptr<ParallelDofs> pardofs, PARALLEL_STATUS status)
+  {
+    if (!pardofs)
+      throw Exception ("CreateParallelVector called, but pardofs is nulltpr");
+
+    // taken this version from the py-interface, maybe we should always create a parallel-vector 
+    // #ifdef PARALLEL
+    if(pardofs->IsComplex())
+      return make_unique<S_ParallelBaseVectorPtr<Complex>> (pardofs->GetNDofLocal(), pardofs->GetEntrySize(), pardofs, status);
+    else
+      return make_unique<S_ParallelBaseVectorPtr<double>> (pardofs->GetNDofLocal(), pardofs->GetEntrySize(), pardofs, status);
+    // #else
+    // return CreateBaseVector (pardofs->GetNDofLocal(), pardofs->IsComplex(), pardofs->GetEntrySize());
+    // #endif
+  }
+
+  
   template class S_ParallelBaseVectorPtr<double>;
   template class S_ParallelBaseVectorPtr<Complex>;
 }

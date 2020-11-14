@@ -2,8 +2,33 @@
 #define NGSOLVE_PYTHON_COMP_HPP
 
 #include <python_ngstd.hpp>
+#include <python_linalg.hpp>
 
 #include "comp.hpp"
+
+namespace pybind11
+{
+  // specialized implementation of polymorphic_type_hook to allow
+  // unregistered derived types convert to registered derived types
+  // by trying to dynamic cast
+  template<>
+  struct polymorphic_type_hook<ngcomp::FESpace>
+  {
+    static const void* get(const ngcomp::FESpace* src, const type_info*& type)
+    {
+      // for example this could be a QuasiPeriodicFESpace<double>, ...
+      if(auto cast = dynamic_cast<const ngcomp::PeriodicFESpace*>(src))
+        {
+          type = &typeid(ngcomp::PeriodicFESpace);
+          return cast;
+        }
+      // if it's not one of these spaces use the default implementation
+      // for dynamic types
+      type = src ? &typeid(*src) : nullptr;
+      return dynamic_cast<const void*>(src);
+    }
+  };
+}
 
 namespace ngcomp
 {

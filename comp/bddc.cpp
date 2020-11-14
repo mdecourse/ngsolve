@@ -35,8 +35,8 @@ namespace ngcomp
     string inversetype;   //sparsecholesky or pardiso or ....
     string coarsetype;    //general precond.. (e.g. AMG)
 
-    BaseVector * tmp;
-    BaseVector * tmp2;
+    unique_ptr<BaseVector> tmp;
+    unique_ptr<BaseVector> tmp2;
 
     shared_ptr<BitArray> wb_free_dofs;
 
@@ -68,8 +68,8 @@ namespace ngcomp
       inv = NULL;
 
       inv_coarse = NULL;
-      tmp = NULL;
-      tmp2 = NULL;
+      // tmp = NULL;
+      // tmp2 = NULL;
       RegionTimer reg(timer);
 
       // auto fes = bfa -> GetFESpace();
@@ -384,8 +384,8 @@ namespace ngcomp
 	  inv_coarse = pwbmat->InverseMatrix(clusters);
 	  cout << IM(3) << "has inverse" << endl << endl;
 	  
-	  tmp = new VVector<>(ndof);
-	  tmp2 = new VVector<>(ndof);
+	  tmp = make_unique<VVector<>>(ndof);
+	  tmp2 = make_unique<VVector<>>(ndof);
 	}
       else
 	{
@@ -408,11 +408,20 @@ namespace ngcomp
                 else
                   inv = pwbmat -> InverseMatrix (wb_free_dofs);
 
-	      tmp = new ParallelVVector<TV>(ndof, pardofs);
-	      innersolve = make_shared<ParallelMatrix> (innersolve, pardofs);
-	      harmonicext = make_shared<ParallelMatrix> (harmonicext, pardofs);
+	      tmp = make_unique<ParallelVVector<TV>>(pardofs);
+	      innersolve =
+                ComposeOperators(make_shared<ParallelMatrix> (innersolve, pardofs, pardofs, C2D),
+                                 make_shared<CumulationOperator> (pardofs));
+	      innersolve =
+                ComposeOperators(make_shared<CumulationOperator> (pardofs), innersolve);
+              
+	      harmonicext =
+                ComposeOperators(make_shared<CumulationOperator> (pardofs),
+                                 make_shared<ParallelMatrix> (harmonicext, pardofs, pardofs, C2D));
+              
 	      if (harmonicexttrans)
-		harmonicexttrans = make_shared<ParallelMatrix> (harmonicexttrans, pardofs);
+		harmonicexttrans = ComposeOperators(make_shared<ParallelMatrix> (harmonicexttrans, pardofs, pardofs, C2D),
+                                                    make_shared<CumulationOperator> (pardofs));
 	    }
 	  else
 	    {
@@ -435,24 +444,13 @@ namespace ngcomp
                 inv = pwbmat->InverseMatrix(wb_free_dofs);
               }
 	      cout << IM(3) << "has inverse" << endl;
-	      tmp = new VVector<TV>(ndof);
+	      tmp = make_unique<VVector<TV>>(ndof);
 	    }
 	}
     }
 
-    ~BDDCMatrix()
-    {
-      // delete inv;
-      // delete pwbmat;
-      // delete inv_coarse;
-      // delete harmonicext;
-      // delete harmonicexttrans;
-      // delete innersolve;
-      // delete wb_free_dofs;
+    ~BDDCMatrix()  { } 
 
-      delete tmp;
-      delete tmp2;
-    }
 
     AutoVector CreateRowVector() const override { return bfa->GetMatrix().CreateColVector(); }
     AutoVector CreateColVector() const override { return bfa->GetMatrix().CreateRowVector(); }
@@ -472,9 +470,9 @@ namespace ngcomp
 
       RegionTimer reg (timer);
 
-      x.Cumulate();
+      x.Distribute();
       y = x;
-
+      
       timerharmonicexttrans.Start();
 
       if (bfa->SymmetricStorage())
@@ -511,11 +509,13 @@ namespace ngcomp
       timerwb.Stop();
 
       timerifs.Start();
+      // tmp->Distribute(); 
       *tmp += *innersolve * x;
       timerifs.Stop();
 
       timerharmonicext.Start();
-      
+
+      // tmp->Cumulate();
       y = *tmp;
       y += *harmonicext * *tmp;
 

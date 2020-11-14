@@ -71,8 +71,17 @@ namespace ngla
 
 
   enum PARALLEL_STATUS { DISTRIBUTED, CUMULATED, NOT_PARALLEL };
-
-
+  inline ostream & operator<< (ostream & ost, PARALLEL_STATUS stat)
+  {
+    switch (stat)
+      {
+      case DISTRIBUTED: ost << "distributed"; break;
+      case CUMULATED: ost << "cumulated"; break;
+      default: ost << "sequential";
+      }
+    return ost;
+  }
+  
 
   /**
      Base vector for linalg
@@ -121,6 +130,11 @@ namespace ngla
       return *this;
     }
 
+    virtual void SetZero ()
+    {
+      SetScalar(0);
+    }
+    
     ///
     template <typename T>
     BaseVector & operator+= (const VVecExpr<T> & v)
@@ -249,8 +263,11 @@ namespace ngla
 
     virtual void SetRandom ();
 
-    virtual AutoVector Range (size_t begin, size_t end) const;
+    inline AutoVector Range (size_t begin, size_t end) const;
+    // { return Range(T_Range(begin, end)); }
     virtual AutoVector Range (T_Range<size_t> range) const;
+    virtual AutoVector Range (DofRange range) const;
+      // { return Range(T_Range<size_t>(range)); }
 
     static bool IsRegularIndex (int index) { return index >= 0; }
     virtual void GetIndirect (FlatArray<int> ind, 
@@ -350,22 +367,26 @@ namespace ngla
   AutoVector CreateBaseVector(size_t size, bool is_complex, int es);
 
   
-  class AutoVector : public BaseVector
+  class NGS_DLL_HEADER AutoVector // : public BaseVector
   {
-    shared_ptr<BaseVector> vec;
+    unique_ptr<BaseVector> vec;
   public:
     AutoVector () { ; }
 
-    AutoVector (const AutoVector & av2) : vec(av2.vec) 
-    { size = av2.Size(), entrysize = av2.EntrySize(); }
+    AutoVector (AutoVector && av2) : vec(move(av2.vec)) { } 
+    // { size = av2.Size(), entrysize = av2.EntrySize(); }
 
-    AutoVector (shared_ptr<BaseVector> hvec) : vec(hvec) 
-    { size = vec->Size(), entrysize = vec->EntrySize(); }
+    AutoVector (unique_ptr<BaseVector> hvec) : vec(move(hvec)) { } 
+    // { size = vec->Size(), entrysize = vec->EntrySize(); }
 
     template<typename U>
-    AutoVector (shared_ptr<U> hvec) : vec(hvec) 
-    { size = vec->Size(), entrysize = vec->EntrySize(); }
+    AutoVector (unique_ptr<U> hvec) : vec(move(hvec)) { } 
+    // { size = vec->Size(), entrysize = vec->EntrySize(); }
 
+    ~AutoVector();
+
+    auto Size() const { return vec->Size(); }
+    
     template <typename T> 
     BaseVector & operator= (const VVecExpr<T> & v)
     {
@@ -385,12 +406,72 @@ namespace ngla
       vec->Set (1.0, *v);
       return *this;
     }
-    ///
-    BaseVector & AssignPointer (const AutoVector & v)
+
+    template <typename T>
+    auto & operator+= (const VVecExpr<T> & v)
     {
-      vec = v.vec;
-      size = v.size;
-      entrysize = v.entrysize;
+      (*vec) += v;
+      return *this;
+    }
+
+    auto & operator+= (const BaseVector & v)
+    {
+      (*vec) += v;
+      return *this;
+    }
+    
+    template <typename T>
+    auto & operator-= (const VVecExpr<T> & v)
+    {
+      (*vec) -= v;
+      return *this;
+    }
+
+    auto & operator-= (const BaseVector & v)
+    {
+      (*vec) -= v;
+      return *this;
+    }
+
+    auto & operator*= (double s)
+    {
+      (*vec) *= s;
+      return *this;
+    }
+
+    ///
+    auto & operator*= (Complex s)
+    {
+      (*vec) *= s;
+      return *this;
+    }
+
+    auto & operator/= (double s)
+    {
+      (*vec) /= s;
+      return *this;
+    }
+
+    ///
+    auto & operator/= (Complex s)
+    {
+      (*vec) /= s;
+      return *this;
+    }
+
+    auto & SetRandom ()
+    {
+      vec->SetRandom();
+      return *this;
+    }
+
+    
+    ///
+    BaseVector & AssignPointer (AutoVector && v)
+    {
+      vec = move(v.vec);
+      // size = v.size;
+      // entrysize = v.entrysize;
       return *this;
     }
     ///
@@ -406,120 +487,131 @@ namespace ngla
       return *this;
     }
 
-    operator shared_ptr<BaseVector> () { return vec; }
+    operator unique_ptr<BaseVector> () && { return move(vec); }
+    operator shared_ptr<BaseVector> () && { return move(vec); }
     BaseVector & operator* () { return *vec; }
     const BaseVector & operator* () const { return *vec; }
+    operator BaseVector & () { return *vec; }
+    operator const BaseVector & () const { return *vec; }
 
+    AutoVector Range (size_t begin, size_t end) const { return vec->Range(begin,end); }
+    AutoVector Range (T_Range<size_t> range) const { return vec->Range(range); }
+    
+    template <typename T>
+    auto FV () const { return vec->FV<T>(); }
+    
 
-    virtual AutoVector Range (size_t begin, size_t end) const { return vec->Range(begin,end); }
-    virtual AutoVector Range (T_Range<size_t> range) const { return vec->Range(range); }
-
-
-    virtual void * Memory () const throw () 
+    void * Memory () const throw () 
     {
       return vec->Memory();
     }
 
-    virtual FlatVector<double> FVDouble () const 
+    FlatVector<double> FVDouble () const 
     {
       return vec->FVDouble();
     }
-    virtual FlatVector<Complex> FVComplex () const
+    
+    FlatVector<Complex> FVComplex () const
     {
       return vec->FVComplex();
     }
 
-    virtual AutoVector CreateVector () const
+    AutoVector CreateVector () const
     {
-      return std::move(vec->CreateVector());
+      return vec->CreateVector();
     }
 
-    virtual double InnerProductD (const BaseVector & v2) const
+    double InnerProductD (const BaseVector & v2) const
     {
       return vec->InnerProductD (v2);
     }
 
-    virtual Complex InnerProductC (const BaseVector & v2, bool conjugate) const
+    Complex InnerProductC (const BaseVector & v2, bool conjugate) const
     {
       return vec->InnerProductC (v2, conjugate);
     }
 
-    virtual double L2Norm () const
+    double L2Norm () const
     {
       return vec->L2Norm();
     }
 
-    virtual bool IsComplex() const 
+    bool IsComplex() const 
     {
       return vec->IsComplex();
     }
 
-    virtual BaseVector & Scale (double scal)
+    BaseVector & Scale (double scal)
     {
       return vec->Scale(scal);
     }
 
-    virtual BaseVector & Scale (Complex scal)
+    BaseVector & Scale (Complex scal)
     {
       return vec->Scale(scal);
     }
 
-    virtual BaseVector & SetScalar (double scal)
+    BaseVector & SetScalar (double scal)
     {
       return vec->SetScalar(scal);
     }
-    virtual BaseVector & SetScalar (Complex scal)
+    BaseVector & SetScalar (Complex scal)
     {
       return vec->SetScalar(scal);
     }
 
-    virtual BaseVector & Set (double scal, const BaseVector & v)
+    BaseVector & Set (double scal, const BaseVector & v)
     {
       return vec->Set (scal,v);
     }
-    virtual BaseVector & Set (Complex scal, const BaseVector & v)
+    BaseVector & Set (Complex scal, const BaseVector & v)
     {
       return vec->Set (scal,v);
     }
 
-    virtual BaseVector & Add (double scal, const BaseVector & v)
+    BaseVector & Add (double scal, const BaseVector & v)
     {
       return vec->Add (scal,v);
     }
-    virtual BaseVector & Add (Complex scal, const BaseVector & v)
+    BaseVector & Add (Complex scal, const BaseVector & v)
     {
       return vec->Add (scal,v);
     }
 
-    virtual ostream & Print (ostream & ost) const
+    ostream & Print (ostream & ost) const
     {
       return vec->Print (ost);
     }
 
 
-    virtual void GetIndirect (FlatArray<int> ind, 
+    void GetIndirect (FlatArray<int> ind, 
 			      FlatVector<double> v) const
     {
       vec -> GetIndirect (ind, v);
     }
-    virtual void GetIndirect (FlatArray<int> ind, 
+    void GetIndirect (FlatArray<int> ind, 
 			      FlatVector<Complex> v) const
     {
       vec -> GetIndirect (ind, v);
     }
 
-    virtual void Cumulate () const 
+    void Cumulate () const 
     { vec -> Cumulate(); }
 
-    virtual void Distribute() const
+    void Distribute() const
     { vec -> Distribute(); }
 
-    virtual PARALLEL_STATUS GetParallelStatus () const
+    PARALLEL_STATUS GetParallelStatus () const
     { return vec -> GetParallelStatus(); }
 
-    virtual void SetParallelStatus (PARALLEL_STATUS stat) const
+    void SetParallelStatus (PARALLEL_STATUS stat) const
     { vec -> SetParallelStatus(stat); }
   };
+
+  AutoVector BaseVector::Range (size_t begin, size_t end) const
+  {
+    return Range(T_Range(begin, end));
+  }
 
 
   template <>
@@ -1021,14 +1113,14 @@ namespace ngla
   template <> inline Complex 
   S_InnerProduct<ComplexConjugate> (const BaseVector & v1, const BaseVector & v2)
   {
-    return v2.InnerProductC(v1, true);
+    return v1.InnerProductC(v2, true);
     // return InnerProduct( v1.FVComplex(), Conj(v2.FVComplex()) );
   }
 
   template <>
   inline Complex S_InnerProduct<ComplexConjugate2> (const BaseVector & v1, const BaseVector & v2)
   {
-    return v1.InnerProductC(v1, true);
+    return v2.InnerProductC(v1, true);
     // return InnerProduct( v2.FVComplex(), Conj(v1.FVComplex()) );
   }
 
@@ -1053,6 +1145,7 @@ namespace ngla
   public:
     DynamicBaseExpression () { } 
     virtual ~DynamicBaseExpression() { }
+    virtual AutoVector CreateVector() const = 0;
     virtual void AssignTo (double s, BaseVector & v2) const = 0;
     virtual void AddTo (double s, BaseVector & v2) const = 0;
     virtual void AssignTo (Complex s, BaseVector & v2) const = 0;
@@ -1066,6 +1159,8 @@ namespace ngla
     shared_ptr<BaseVector> a;
   public:
     DynamicVecExpression (shared_ptr<BaseVector> aa) : a(aa) { ; }
+    AutoVector CreateVector() const override
+    { return a->CreateVector(); }
     void AssignTo (double s, BaseVector & v2) const override
     { v2.Set (s, *a); }
     void AddTo (double s, BaseVector & v2) const override
@@ -1079,6 +1174,9 @@ namespace ngla
   class DynamicSumExpression : public DynamicBaseExpression
   {
     shared_ptr<DynamicBaseExpression> a,b;
+    
+    AutoVector CreateVector() const override
+    { return a->CreateVector(); }    
     void AssignTo (double s, BaseVector & v2) const override
     {
       a->AssignTo(s, v2);
@@ -1108,6 +1206,10 @@ namespace ngla
   class DynamicSubExpression : public DynamicBaseExpression
   {
     shared_ptr<DynamicBaseExpression> a,b;
+    
+    AutoVector CreateVector() const override
+    { return a->CreateVector(); }    
+
     void AssignTo (double s, BaseVector & v2) const override
     {
       a->AssignTo(s, v2);
@@ -1139,6 +1241,9 @@ namespace ngla
   {
     T scale;
     shared_ptr<DynamicBaseExpression> a;
+
+    AutoVector CreateVector() const override
+    { return a->CreateVector(); }    
     
     void AssignTo (double s, BaseVector & v2) const override
     {
@@ -1171,7 +1276,15 @@ namespace ngla
     DynamicVectorExpression() { } 
     DynamicVectorExpression (shared_ptr<DynamicBaseExpression> ave) : ve(ave) { }
     DynamicVectorExpression (shared_ptr<BaseVector> v)
-      : ve(make_shared<DynamicVecExpression>(v)) { } 
+      : ve(make_shared<DynamicVecExpression>(v)) { }
+
+    AutoVector Evaluate() const
+    {
+      auto vec = ve->CreateVector();
+      ve->AssignTo (1, vec);
+      return vec;
+    }
+    
     void AssignTo (double s, BaseVector & v2) const
     { ve->AssignTo(s,v2); }
     void AddTo (double s, BaseVector & v2) const
