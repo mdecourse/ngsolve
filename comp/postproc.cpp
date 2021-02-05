@@ -408,7 +408,7 @@ namespace ngcomp
           { diffop = fes->GetAdditionalEvaluators()["dual"].get(); }
 	else if ( diffop != fes->GetAdditionalEvaluators()["dual"].get() )
 	  { throw Exception("diffop has to be nullptr or dual diffop!"); }
-        
+
 	/** Trial-Proxy **/
         if (!fes->GetEvaluator(vb))
           throw Exception(fes->GetClassName()+string(" does not have an evaluator for ")+ToString(vb)+string("!"));
@@ -420,7 +420,8 @@ namespace ngcomp
 
 	/** Test-Proxy (dual) **/
 	auto dual_evaluator = fes->GetAdditionalEvaluators()["dual"];
-	for (VorB avb = VOL; avb < vb; avb++) {
+        
+        for (VorB avb = VOL; avb < vb; avb++) {
 	  dual_evaluator = dual_evaluator->GetTrace();
 	  if ( dual_evaluator == nullptr )
 	    { throw Exception(fes->GetClassName() + string(" has no dual trace operator for vb = ") + \
@@ -430,8 +431,7 @@ namespace ngcomp
           dual_evaluator = dynamic_pointer_cast<BlockDifferentialOperator>(dual_evaluator)->BaseDiffOp();
 	auto dual = make_shared<ProxyFunction>(fes, true, false, dual_evaluator,
 					       nullptr, nullptr, nullptr, nullptr, nullptr);
-    
-	/** Set up integrators - may need integrators for multiple node-types **/
+        /** Set up integrators - may need integrators for multiple node-types **/
         Array<shared_ptr<BilinearFormIntegrator>> bli;
         Array<shared_ptr<BilinearFormIntegrator>> single_bli;
 	for (auto element_vb : fes->GetDualShapeNodes(vb)) {
@@ -455,7 +455,8 @@ namespace ngcomp
 	if ( !bli.Size() )
 	  { throw Exception("Error in SetValues: No dual shape Integrators!"); }
 
-	int dimflux = diffop ? diffop->Dim() : bli[0]->DimFlux(); 
+        int dimflux = dual_evaluator->Dim();
+        
         if (coef -> Dimension() != dimflux)
           throw Exception(string("Error in SetValues: gridfunction-dim = ") + ToString(dimflux) +
                           ", but coefficient-dim = " + ToString(coef->Dimension()));
@@ -464,7 +465,6 @@ namespace ngcomp
         u.GetVector(mdcomp) = 0.0;
         
         ProgressOutput progress (ma, "setvalues element", ma->GetNE(vb));
-        
         IterateElements 
           (*fes, vb, clh, 
            [&] (FESpace::Element ei, LocalHeap & lh)
@@ -494,55 +494,44 @@ namespace ngcomp
                {
                  try
                    {
-		     if ( !diffop )
-		       { throw ExceptionNOSIMD("need diffop"); }
-
 		     /** Calc RHS **/
-
 		     elflux = SCAL(0.0);
-
-		     auto do_ir = [&](auto & mir) {
-		       FlatMatrix<SIMD<SCAL>> mfluxi(dimflux, mir.IR().Size(), lh);
-		       coef->Evaluate (mir, mfluxi);
-		       for (size_t j : Range(mir))
-			 { mfluxi.Col(j) *= mir[j].GetWeight(); }
-		       diffop -> AddTrans (fel, mir, mfluxi, elflux);
-		     };
-
-		     for (auto el_vb : fes->GetDualShapeNodes(vb)) {
-		       if ( el_vb == VOL ) {
-			 SIMD_IntegrationRule ir(fel.ElementType(), 2 * fel.Order());
-			 auto & mir = eltrans(ir, lh);
-			 do_ir(mir);
-		       }
-		       else {
+		     for (auto el_vb : fes->GetDualShapeNodes(vb))
+		       {
 			 Facet2ElementTrafo f2el (fel.ElementType(), el_vb);
-			 for (int locfnr : Range(f2el.GetNFacets())) {
-			   SIMD_IntegrationRule irfacet(f2el.FacetType(locfnr), 2 * fel.Order());
-			   auto & irvol = f2el(locfnr, irfacet, lh);
-			   auto & mir = eltrans(irvol, lh);
-			   mir.ComputeNormalsAndMeasure(fel.ElementType(), locfnr);
-			   do_ir(mir);
-			 }
+			 for (int locfnr : Range(f2el.GetNFacets()))
+			   {
+			     SIMD_IntegrationRule irfacet(f2el.FacetType(locfnr), 2 * fel.Order());
+			     auto & irvol = f2el(locfnr, irfacet, lh);
+			     auto & mir = eltrans(irvol, lh);
+
+			     FlatMatrix<SIMD<SCAL>> mfluxi(dimflux, mir.IR().Size(), lh);
+			     coef->Evaluate (mir, mfluxi);
+			     for (size_t j : Range(mir))
+			       mfluxi.Col(j) *= mir[j].GetWeight(); 
+			     dual_evaluator -> AddTrans (fel, mir, mfluxi, elflux);
+			   }
 		       }
-		     }
+
+                     if (!fel.SolveDuality (elflux, elfluxi, lh))
+                       {
+                         /** Calc Element Matrix **/
+                         FlatMatrix<SCAL> elmat(fel.GetNDof(), lh); elmat = 0.0;
+                         bool symmetric_so_far = true;
+                         for (auto sbfi : single_bli)
+                           { sbfi->CalcElementMatrixAdd (fel, eltrans, elmat, symmetric_so_far, lh); }
+                         
+                         /** Invert Element Matrix and Solve for RHS **/
+                         CalcInverse(elmat); // Not Symmetric !
+                         
+                         if (dim > 1) {
+                           for (int j = 0; j < dim; j++)
+                             { elfluxi.Slice (j,dim) = elmat * elflux.Slice (j,dim); }
+                         }
+                         else
+                           { elfluxi = elmat * elflux; }
+                       }
                      
-		     /** Calc Element Matrix **/
-		     FlatMatrix<SCAL> elmat(fel.GetNDof(), lh); elmat = 0.0;
-                     bool symmetric_so_far = true;
-		     for (auto sbfi : single_bli)
-		       { sbfi->CalcElementMatrixAdd (fel, eltrans, elmat, symmetric_so_far, lh); }
-
-		     /** Invert Element Matrix and Solve for RHS **/
-		     CalcInverse(elmat); // Not Symmetric !
-
-		     if (dim > 1) {
-		       for (int j = 0; j < dim; j++)
-			 { elfluxi.Slice (j,dim) = elmat * elflux.Slice (j,dim); }
-		     }
-		     else
-		       { elfluxi = elmat * elflux; }
-
 		     /** Write into large vector **/
 		     fes->TransformVec (ei, elfluxi, TRANSFORM_SOL_INVERSE);
                      u.GetElementVector (mdcomp, ei.GetDofs(), elflux);
@@ -566,65 +555,61 @@ namespace ngcomp
                } // ( use_simd )
              
 	     /** Calc RHS **/
-	     if ( !diffop )
-	       { throw Exception("SymbolicBFI has no ApplyBTrans"); }
-
-
+             /*
 	     auto do_ir = [&](auto & mir) {
 	       FlatMatrix<SCAL> mfluxi(mir.IR().GetNIP(), dimflux, lh);
 	       coef->Evaluate (mir, mfluxi);
 	       for (int j : Range(mir))
 		 mfluxi.Row(j) *= mir[j].GetWeight();
 	       FlatVector<SCAL> elfluxadd(fel.GetNDof() * dim, lh); elfluxadd = 0;
-	       // if (diffop) {
-	       diffop -> ApplyTrans (fel, mir, mfluxi, elfluxadd, lh);
+               
+	       dual_evaluator -> ApplyTrans (fel, mir, mfluxi, elfluxadd, lh);
 	       elflux += elfluxadd;
-	     //   }
-	     //   else { // !! SymbolicBFI has no ApplyBTrans !!
-	     // 	 for (auto bfi : single_bli) {
-	     // 	   bfi->ApplyBTrans (fel, mir, mfluxi, elfluxadd, lh);
-	     // 	   cout << " flux add " << endl << elfluxadd << endl;
-	     // 	   elflux += elfluxadd;
-	     // 	 }
-	     //   }
 	     };
-	     
+	     */
 	     elflux = SCAL(0.0);
 
-	     for (auto el_vb : fes->GetDualShapeNodes(vb)) {
-	       if ( el_vb == VOL ) {
-		 IntegrationRule ir(fel.ElementType(), 2 * fel.Order());
-		 auto & mir = eltrans(ir, lh);
-		 do_ir(mir);
-	       }
-	       else {
+	     for (auto el_vb : fes->GetDualShapeNodes(vb))
+               {
 		 Facet2ElementTrafo f2el (fel.ElementType(), el_vb);
-		 for (int locfnr : Range(f2el.GetNFacets())) {
-		   IntegrationRule irfacet(f2el.FacetType(locfnr), 2 * fel.Order());
-		   auto & irvol = f2el(locfnr, irfacet, lh);
-		   auto & mir = eltrans(irvol, lh);
-		   mir.ComputeNormalsAndMeasure(fel.ElementType(), locfnr);
-		   do_ir(mir);
-		 }
-	       }
-	     }
-             
-	     /** Calc Element Matrix **/
-	     FlatMatrix<SCAL> elmat(fel.GetNDof(), lh); elmat = 0.0;
-             bool symmetric_so_far = true;             
-	     for (auto sbfi : single_bli)
-	       { sbfi->CalcElementMatrixAdd (fel, eltrans, elmat, symmetric_so_far, lh); }
+		 for (int locfnr : Range(f2el.GetNFacets()))
+                   {
+                     HeapReset hr(lh);
+                     IntegrationRule irfacet(f2el.FacetType(locfnr), 2 * fel.Order());
+                     auto & irvol = f2el(locfnr, irfacet, lh);
+                     auto & mir = eltrans(irvol, lh);
+                     // mir.ComputeNormalsAndMeasure(fel.ElementType(), locfnr);
+                     // do_ir(mir);
+                     
+                     FlatMatrix<SCAL> mfluxi(mir.IR().GetNIP(), dimflux, lh);
+                     coef->Evaluate (mir, mfluxi);
+                     for (int j : Range(mir))
+                       mfluxi.Row(j) *= mir[j].GetWeight();
+                     FlatVector<SCAL> elfluxadd(fel.GetNDof() * dim, lh); elfluxadd = 0;
+                     
+                     dual_evaluator -> ApplyTrans (fel, mir, mfluxi, elfluxadd, lh);
+                     elflux += elfluxadd;
+                   }
+               }
 
-
-	     /** Invert Element Matrix and Solve for RHS **/
-	     CalcInverse(elmat); // Not Symmetric !
-
-	     if (dim > 1) {
-	       for (int j = 0; j < dim; j++)
-		 { elfluxi.Slice (j,dim) = elmat * elflux.Slice (j,dim); }
-	     }
-	     else
-	       { elfluxi = elmat * elflux; }
+             if (!fel.SolveDuality (elflux, elfluxi, lh))
+               {
+                 /** Calc Element Matrix **/
+                 FlatMatrix<SCAL> elmat(fel.GetNDof(), lh); elmat = 0.0;
+                 bool symmetric_so_far = true;
+                 for (auto sbfi : single_bli)
+                   { sbfi->CalcElementMatrixAdd (fel, eltrans, elmat, symmetric_so_far, lh); }
+                 
+                 /** Invert Element Matrix and Solve for RHS **/
+                 CalcInverse(elmat); // Not Symmetric !
+                 
+                 if (dim > 1) {
+                   for (int j = 0; j < dim; j++)
+                     { elfluxi.Slice (j,dim) = elmat * elflux.Slice (j,dim); }
+                 }
+                 else
+                   { elfluxi = elmat * elflux; }
+               }
              
 	     /** Write into large vector **/
              fes->TransformVec (ei, elfluxi, TRANSFORM_SOL_INVERSE);

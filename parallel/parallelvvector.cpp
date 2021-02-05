@@ -28,6 +28,9 @@ namespace ngla
     void * Memory () const override
     { return orig->GetLocalVector()->Range(range).Memory(); }
 
+    virtual int EntrySizeScal() const throw () override
+    { return orig->EntrySizeScal(); }
+
     virtual bool IsComplex() const override
     { return orig->IsComplex(); } 
     
@@ -298,14 +301,17 @@ namespace ngla
             static Timer t("masked ip"); RegionTimer reg(t);
             FlatVector<> me = this->FVDouble();
             FlatVector<> you = parv2->FVDouble();
-            const BitArray & ba = paralleldofs->MasterDofs();
-            double sum = 0;
-            for (size_t i = 0; i < me.Size(); i++)
-              if (ba.Test(i))
-                sum += me(i) * you(i);
-            return paralleldofs->GetCommunicator().AllReduce (sum, MPI_SUM);            
+            const BitArray & ba = const_cast<BitArray&>(paralleldofs->MasterDofs());
+	    SCAL localsum = MatKernelMaskedScalAB(me.Size(), me.Data(), 0, you.Data(), 0, ba);
+	    if ( this->Status() == NOT_PARALLEL && parv2->Status() == NOT_PARALLEL )
+	      { return localsum; }
+	    return paralleldofs->GetCommunicator().AllReduce (localsum, MPI_SUM);
+            // double sum = 0;
+            // for (size_t i = 0; i < me.Size(); i++)
+            //   if (ba.Test(i))
+            //     sum += me(i) * you(i);
+            // return paralleldofs->GetCommunicator().AllReduce (sum, MPI_SUM);
           }
-
         Distribute();
       }
     
@@ -486,7 +492,8 @@ namespace ngla
       sub_pardofs = paralleldofs->Range(range);
     
     AutoVector locvec = S_BaseVectorPtr<SCAL>::Range (range);
-    auto vec = make_unique<S_ParallelBaseVectorPtr<SCAL>> (range.Size(), this->EntrySize(),
+    auto vec = make_unique<S_ParallelBaseVectorPtr<SCAL>> (range.Size(),
+							   this->EntrySizeScal(),
                                                            locvec.Memory(), 
                                                            sub_pardofs,
                                                            this->GetParallelStatus());
@@ -507,7 +514,8 @@ namespace ngla
   AutoVector S_ParallelBaseVectorPtr<SCAL> :: Range (DofRange range) const
   {
     AutoVector locvec = S_BaseVectorPtr<SCAL>::Range (range);
-    auto vec = make_unique<S_ParallelBaseVectorPtr<SCAL>> (range.Size(), this->EntrySize(),
+    auto vec = make_unique<S_ParallelBaseVectorPtr<SCAL>> (range.Size(),
+							   this->EntrySizeScal(),
                                                            locvec.Memory(), 
                                                            range.GetParallelDofs(),
                                                            this->GetParallelStatus());

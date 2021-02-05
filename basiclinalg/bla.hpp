@@ -22,9 +22,11 @@ namespace ngbla
 
 #ifdef USE_MYCOMPLEX
   typedef MyComplex<double> Complex;
+  using std::fabs;
   inline double fabs (Complex v) { return ngstd::abs (v); }
 #else
   // typedef std::complex<double> Complex;
+  using std::fabs;
   inline double fabs (Complex v) { return std::abs (v); }
 #endif
 
@@ -80,6 +82,7 @@ namespace ngcore
 #include "symmetricmatrix.hpp"
 #include "bandmatrix.hpp"
 #include "triangular.hpp"
+#include "householder.hpp"
 #include "tensor.hpp"
 
 #include "cuda_bla.hpp"

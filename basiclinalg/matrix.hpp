@@ -180,6 +180,14 @@ namespace ngbla
       return SliceVector<T,TIND> (h, w+1, &data[0]);
     }
 
+    const SliceVector<T> Diag (int offset) const
+    {
+      int dp = max(offset, 0);
+      int dm = min(offset, 0);
+      return SliceVector<T> (min(w-dp, h+dm), Dist()+1, data+dp-dm*Dist());
+    }
+    
+
     using CMCPMatExpr<FlatMatrix>::Rows;
     using CMCPMatExpr<FlatMatrix>::Cols;
 
@@ -208,6 +216,17 @@ namespace ngbla
       return BareSliceMatrix<T> (w*adist, data+first*w, DummySize( Height()/adist, w));
     }
 
+    INLINE auto SplitRows (size_t split) const
+    {
+      return tuple(Rows(0,split), Rows(split, Height()));
+    }
+
+    INLINE auto SplitCols (size_t split) const
+    {
+      return tuple(Cols(0,split), Cols(split, Width()));
+    }
+
+    
     /*
     INLINE operator SliceMatrix<T> () const
     {
@@ -386,6 +405,17 @@ namespace ngbla
       return SliceMatrix<T,ColMajor> (range.Size(), w, h, data+range.First());
     }
 
+    INLINE auto SplitRows (size_t split) const
+    {
+      return tuple(Rows(0,split), Rows(split, Height()));
+    }
+
+    INLINE auto SplitCols (size_t split) const
+    {
+      return tuple(Cols(0,split), Cols(split, Width()));
+    }
+
+    
     
     /*
     using CMCPMatExpr<FlatMatrix<T> >::Rows;
@@ -1486,14 +1516,19 @@ namespace ngbla
       return SliceMatrix (next-first, w, dist, data+first*dist);
     }
 
+    INLINE auto SplitRows (size_t split) const
+    {
+      return tuple(Rows(0,split), Rows(split, Height()));
+    }
+
+    INLINE auto SplitCols (size_t split) const
+    {
+      return tuple(Cols(0,split), Cols(split, Width()));
+    }
+    
     INLINE const FlatVector<T> Row (size_t i) const
     {
       return FlatVector<T> (w, &data[i*dist]);
-    }
-
-    INLINE const FlatVector<T> Diag (size_t i) const
-    {
-      return SliceVector<T> (h, dist+1, data);
     }
 
     INLINE const SliceVector<T> Col (size_t i) const
@@ -1520,6 +1555,15 @@ namespace ngbla
     {
       return SliceVector<T> (h, dist+1, &data[0]);
     }
+
+    INLINE const SliceVector<T> Diag (int offset) const
+    {
+      // return SliceVector<T> (h, dist+1, data);
+      int dp = max(offset, 0);
+      int dm = min(offset, 0);
+      return SliceVector<T> (min(w-dp, h+dm), dist+1, data+dp-dm*dist);
+    }
+
 
   };
 
@@ -1616,7 +1660,14 @@ namespace ngbla
       return SliceVector<T> (w, dist+1, data);
     }
 
+    const SliceVector<T> Diag (int offset) const
+    {
+      int dp = max(offset, 0);
+      int dm = min(offset, 0);
+      return SliceVector<T> (min(w-dp, h+dm), dist+1, data-dm+dp*dist);
+    }
 
+    
     const SliceMatrix Rows (size_t first, size_t next) const
     {
       return SliceMatrix (next-first, w, dist, data+first);
@@ -1637,6 +1688,18 @@ namespace ngbla
     {
       return Cols (range.First(), range.Next());
     }
+
+    INLINE auto SplitRows (size_t split) const
+    {
+      return tuple(Rows(0,split), Rows(split, Height()));
+    }
+
+    INLINE auto SplitCols (size_t split) const
+    {
+      return tuple(Cols(0,split), Cols(split, Width()));
+    }
+
+    
   };
 
   

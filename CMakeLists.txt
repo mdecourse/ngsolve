@@ -183,6 +183,11 @@ if(APPLE)
     list(APPEND NGSOLVE_COMPILE_DEFINITIONS MSG_NOSIGNAL=0)
 endif(APPLE)
 
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    list(APPEND NGSOLVE_COMPILE_OPTIONS -Wno-undefined-var-template)
+endif()
+
+
 #######################################################################
 if (NETGEN_USE_GUI)
     list(APPEND NGSOLVE_COMPILE_DEFINITIONS TCL)
@@ -202,10 +207,13 @@ if (NETGEN_USE_MPI)
 endif (NETGEN_USE_MPI)
 
 #######################################################################
+add_library(ngs_lapack INTERFACE )
+install( TARGETS ngs_lapack ${ngs_install_dir} )
 if (USE_LAPACK)
     if(NOT LAPACK_LIBRARIES)
       find_package(LAPACK REQUIRED)
     endif()
+    target_link_libraries(ngs_lapack INTERFACE "${LAPACK_LIBRARIES}")
 endif (USE_LAPACK)
 
 #######################################################################
@@ -228,10 +236,9 @@ list (APPEND NGSOLVE_COMPILE_OPTIONS -DMAX_SYS_DIM=${MAX_SYS_DIM})
 #######################################################################
 if (USE_MKL)
     find_package(MKL REQUIRED)
-    include_directories(${MKL_INCLUDE_DIRS})
+    target_include_directories(ngs_lapack INTERFACE "${MKL_INCLUDE_DIRS}")
     list(APPEND NGSOLVE_COMPILE_DEFINITIONS USE_PARDISO)
     list(APPEND NGSOLVE_COMPILE_DEFINITIONS_PRIVATE USE_MKL)
-
 
     if("${MKL_INTERFACE_LAYER}" STREQUAL "_ilp64")
       list(APPEND NGSOLVE_COMPILE_DEFINITIONS MKL_ILP64)
@@ -239,7 +246,6 @@ if (USE_MKL)
     if(MKL_STATIC AND WIN32)
       install(FILES ${MKL_RTL_LIBRARY_BIN} DESTINATION ${NGSOLVE_INSTALL_DIR_BIN} COMPONENT ngsolve )
     endif()
-
 endif (USE_MKL)
 
 if(MKL_STATIC)
@@ -410,6 +416,7 @@ if(APPLE)
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/pictures/logo.icns DESTINATION ${NGSOLVE_INSTALL_DIR_RES}/../ RENAME Netgen.icns)
     if(CMAKE_OSX_SYSROOT)
         set( ngscxx_includes "-isysroot ${CMAKE_OSX_SYSROOT} ${ngscxx_includes}" )
+        set( ngsld_flags "-isysroot ${CMAKE_OSX_SYSROOT} ${ngsld_flags}" )
     endif()
     #   set(ngscxx_flags "${ngscxx_flags} -Qunused-arguments")
     set(ngscxx_includes "${ngscxx_includes} -I$Netgen_BUNDLE/Contents/Resources/include" )  
@@ -490,6 +497,7 @@ endif (NETGEN_USE_MPI)
 
 #######################################################################
 
+add_subdirectory(cmake/resources)
 add_subdirectory(include)
 add_subdirectory(ngstd)
 add_subdirectory(basiclinalg)

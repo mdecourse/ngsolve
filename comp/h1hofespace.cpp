@@ -100,6 +100,18 @@ namespace ngcomp
       // fel.CalcDualShape (mip, mat);
       throw Exception(string("DiffOpDual not available for mat ")+typeid(mat).name());
     }
+
+    using DiffOp<DiffOpDual<D>>::AddTransSIMDIR;
+    template <typename FEL, class MIR, class TVY>
+    static void AddTransSIMDIR (const FEL & fel, const MIR & mir,
+                                BareSliceMatrix<SIMD<double>> x, TVY & y)
+    {
+      STACK_ARRAY(SIMD<double>, memx, mir.Size());
+      FlatVector<SIMD<double>> hx(mir.Size(), &memx[0]);
+      for (size_t i = 0; i < mir.Size(); i++)
+        hx(i) = x(0,i) / mir[i].GetMeasure();
+      static_cast<const ScalarFiniteElement<D>&>(fel).AddDualTrans (mir.IR(), hx, y);
+    }    
   };
 
 
@@ -854,6 +866,18 @@ into the wirebasket.
     mu += { "H1HighOrder::order_face", order_face.Size()*sizeof(INT<2,TORDER>), 1 };
     mu += { "H1HighOrder::order_edge", order_edge.Size()*sizeof(TORDER), 1 };
     return mu;
+  }
+
+  FlatArray<VorB> H1HighOrderFESpace :: GetDualShapeNodes (VorB vb) const
+  {
+    static VorB nodes[] = { VOL, BND, BBND, BBBND };
+
+    if (first_edge_dof[0] == GetNDof())
+      return FlatArray<VorB> (1, &nodes[ma->GetDimension()]); 
+    if (first_face_dof[0] == GetNDof())
+      return FlatArray<VorB> (2, &nodes[ma->GetDimension()-1]); 
+    
+    return FlatArray<VorB> (ma->GetDimension()-int(vb)+1, &nodes[0]); 
   }
 
   

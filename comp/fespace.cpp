@@ -304,6 +304,14 @@ lot of new non-zero entries in the matrix!\n" << endl;
 
     for (auto & et : et_bonus_order) et = 0;
     et_bonus_order[ET_QUAD] = int (flags.GetNumFlag("quadbonus",0));
+
+    this->GetMemoryTracer().Track(
+        dirichlet_dofs, "dirichlet_dofs",
+        dirichlet_vertex, "dirichlet_vertex",
+        dirichlet_edge, "dirichlet_edge",
+        dirichlet_face, "dirichlet_face",
+        ctofdof, "ctofdof"
+    );
   }
 
   
@@ -370,7 +378,7 @@ lot of new non-zero entries in the matrix!\n" << endl;
     docu.Arg("order_policy") = "ORDER_POLICY = ORDER_POLICY.OLDSTYLE\n"
       "  CONSTANT .. use the same fixed order for all elements,\n"
       "  NODAL ..... use the same order for nodes of same shape,\n"
-      "  VARIBLE ... use an individual order for each edge, face and cell,\n"
+      "  VARIABLE ... use an individual order for each edge, face and cell,\n"
       "  OLDSTYLE .. as it used to be for the last decade";
     return docu;
   }
@@ -1520,7 +1528,7 @@ lot of new non-zero entries in the matrix!\n" << endl;
     bool eliminate_internal = flags.GetDefineFlag("eliminate_internal");
     auto freedofs = GetFreeDofs(eliminate_internal);
 
-    FilteredTableCreator creator(GetFreeDofs().get());
+    FilteredTableCreator creator(freedofs.get());
 
     /*
     for ( ; !creator.Done(); creator++)
@@ -1564,6 +1572,17 @@ lot of new non-zero entries in the matrix!\n" << endl;
                 for (int k = 0; k < face.vertices.Size(); k++)
                   creator.Add (face.vertices[k], d);
           }
+
+        if(ma->GetDimension() == 3)
+           for(size_t i : Range(ma->GetNE()))
+             {
+               GetDofNrs(NodeId(NT_CELL, i), dofs);
+               auto elverts = ma->GetElVertices(ElementId(VOL, i));
+               for(auto d : dofs)
+                 if(IsRegularDof(d))
+                   for(auto v : elverts)
+                     creator.Add(v, d);
+             }
       }
     /*
                  

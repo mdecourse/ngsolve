@@ -7,75 +7,6 @@
 namespace ngcomp
 {
 
-  template <int D, typename FEL = HDivFiniteElement<D-1> >
-class DiffOpIdHDivSurface : public DiffOp<DiffOpIdHDivSurface<D, FEL> >
-{
-public:
-    enum { DIM = 1 };
-    enum { DIM_SPACE = D };
-    enum { DIM_ELEMENT = D-1 };
-    enum { DIM_DMAT = D };
-    enum { DIFFORDER = 0 };
-
-    static const FEL & Cast(const FiniteElement & fel)
-    {
-        return static_cast<const FEL&> (fel);
-    }
-
-    template <typename AFEL, typename MIP, typename MAT>
-    static void GenerateMatrix (const AFEL & fel, const MIP & mip,
-				MAT & mat, LocalHeap & lh)
-    {
-      mat = (1.0 / mip.GetJacobiDet()) *mip.GetJacobian () * 
-	Trans (Cast(fel).GetShape(mip.IP(),lh));
-    }
-
-  /*
-  template <typename AFEL, typename MIP, class TVX, class TVY>
-  static void ApplyTrans (const AFEL & fel, const MIP & mip,
-			  const TVX & x, TVY & y,
-			  LocalHeap & lh) 
-  {
-    throw Exception("in DiffOpIdHDivSurface::ApplyTrans");
-    HeapReset hr(lh);
-    typedef typename TVX::TSCAL TSCAL;
-    
-    Vec<D,TSCAL> hv = Trans (mip.GetJacobian()) * x;
-    hv *= (1.0/mip.GetJacobiDet());
-    y = Cast(fel).GetShape(mip.IP(),lh) * hv;
-  }
-  */
-
-  using DiffOp<DiffOpIdHDivSurface<D,FEL>>::ApplySIMDIR;        
-  static void ApplySIMDIR (const FiniteElement & fel, const SIMD_BaseMappedIntegrationRule & mir,
-                           BareSliceVector<double> x, BareSliceMatrix<SIMD<double>> y)
-  {
-    Cast(fel).Evaluate (mir, x, y);
-  }    
-  
-  using DiffOp<DiffOpIdHDivSurface<D,FEL>>::AddTransSIMDIR;          
-  static void AddTransSIMDIR (const FiniteElement & fel, const SIMD_BaseMappedIntegrationRule & mir,
-                              BareSliceMatrix<SIMD<double>> y, BareSliceVector<double> x)
-  {
-    Cast(fel).AddTrans (mir, y, x);
-  }
-
-
-  static void GenerateMatrixSIMDIR (const FiniteElement & fel,
-                                    const SIMD_BaseMappedIntegrationRule & mir, BareSliceMatrix<SIMD<double>> mat)
-  {
-    Cast(fel).CalcMappedShape (mir, mat);
-  }
-
-  static shared_ptr<CoefficientFunction>
-  DiffShape (shared_ptr<CoefficientFunction> proxy,
-             shared_ptr<CoefficientFunction> dir)
-  {
-    return -TraceCF(dir->Operator("Gradboundary"))*proxy + dir->Operator("Gradboundary") * proxy;
-  }
-  
-};
-
 
 template <int D, typename FEL = HDivNormalFiniteElement<D-2> >
 class DiffOpIdVecHDivSurfaceBoundary : public DiffOp<DiffOpIdVecHDivSurfaceBoundary<D, FEL> >
@@ -225,6 +156,8 @@ public:
     DefineDefineFlag("discontinuous");   
     DefineDefineFlag("hodivfree");
     DefineNumFlag("orderinner");
+    DefineDefineFlag("RT");
+
     
     if(parseflags) CheckFlags(flags);
 
@@ -246,11 +179,13 @@ public:
 
     *testout << "uniform_order_inner = " << uniform_order_inner << endl;
 
-    ho_div_free = flags.GetDefineFlag("hodivfree"); 
+    ho_div_free = flags.GetDefineFlag("hodivfree");
+    RT = flags.GetDefineFlag ("RT");
+
            
     auto one = make_shared<ConstantCoefficientFunction> (1);
     
-    if (ma->GetDimension() == 2)
+    if (ma->GetDimension() < 3)
       {
 	throw Exception ("only 2D manifolds supported");       
       }
@@ -262,6 +197,8 @@ public:
 
 	flux_evaluator[VOL] =  make_shared<T_DifferentialOperator<DiffOpDivHDiv<3>>>();
 	flux_evaluator[BND] = make_shared<T_DifferentialOperator<DiffOpDivHDivSurface<3>>>();
+
+        additional_evaluators.Set ("grad", make_shared<T_DifferentialOperator<DiffOpGradientHDivSurface<3>>> ());
       }
     
     highest_order_dc = flags.GetDefineFlag("highest_order_dc");
@@ -281,6 +218,11 @@ public:
     auto docu = FESpace::GetDocu();
     docu.Arg("discontinuous") = "bool = False\n"
       "  Create discontinuous HDivSurface space";
+    docu.Arg("hodivfree") = "bool = False\n"
+      "  Remove high order element bubbles with non zero divergence";
+    docu.Arg("RT") = "bool = False\n"
+      "  RT elements for simplicial elements: P^k subset RT_k subset P^{k+1}";
+
     return docu;
   }
   
@@ -426,6 +368,8 @@ void HDivHighOrderSurfaceFESpace :: Average (BaseVector & vec) const
                 else
 		  inci = p[0]*(p[0]-1)/2;
 		    //inci = pc[0]*(pc[0]-1)/2;
+                if (RT)
+                  inci += p[0] + 1;
                 break;
               case ET_QUAD:
 		if (!ho_div_free)
@@ -564,6 +508,8 @@ void HDivHighOrderSurfaceFESpace :: Average (BaseVector & vec) const
     HDivHighOrderFE<ET>* hofe = new (lh)HDivHighOrderFE<ET>();
     hofe->SetOrderInner(order_inner[ei.Nr()][0]);
     hofe->SetVertexNumbers(ngel.Vertices());
+    hofe->SetRT(RT);
+
 
     Array<int> facet_order(ngel.Edges());
     facet_order = order;
@@ -668,24 +614,6 @@ void HDivHighOrderSurfaceFESpace :: Average (BaseVector & vec) const
     dnums = GetElementDofs (elnr);
   }
 
-  SymbolTable<shared_ptr<DifferentialOperator>>
-  HDivHighOrderSurfaceFESpace :: GetAdditionalEvaluators () const
-  {
-    SymbolTable<shared_ptr<DifferentialOperator>> additional;
-    
-    switch (ma->GetDimension())
-      {
-      case 1:
-	throw Exception("wrong dimension"); 
-      case 2:
-	throw Exception("wrong dimension"); 
-      case 3:
-        additional.Set ("grad", make_shared<T_DifferentialOperator<DiffOpGradientHDivSurface<3>>> ()); break;
-      default:
-        ;
-	}
-    return additional;
-  }
 
   static RegisterFESpace<HDivHighOrderSurfaceFESpace> init ("hdivhosurface");
 }

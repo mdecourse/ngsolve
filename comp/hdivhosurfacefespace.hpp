@@ -33,6 +33,8 @@ namespace ngcomp
     bool ho_div_free;       
     bool highest_order_dc;
 
+    bool RT = false; 
+
     Array<INT<2>> dc_pairs;
     
   public:
@@ -67,8 +69,6 @@ namespace ngcomp
     //virtual void GetSDofNrs (ElementId ei, Array<DofId> & dnums) const;
     
     const Array<INT<2>> & GetDCPairs () const { return dc_pairs; }
-
-    virtual SymbolTable<shared_ptr<DifferentialOperator>> GetAdditionalEvaluators () const override;
 
     virtual void GetVertexDofNrs (int vnr, Array<DofId> & dnums) const override;
        
